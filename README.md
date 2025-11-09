@@ -2,6 +2,10 @@
 
 Simple Snowflake MCP Server to work behind a corporate proxy (because I could not get that in a few minutes with existing servers, but my own server, yup). Still don't know if it's good or not. But it's good enough for now.
 
+<a href="https://glama.ai/mcp/servers/@YannBrrd/simple_snowflake_mcp">
+  <img width="380" height="200" src="https://glama.ai/mcp/servers/@YannBrrd/simple_snowflake_mcp/badge" alt="Simple Snowflake MCP server" />
+</a>
+
 ### Tools
 
 The server exposes the following MCP tools to interact with Snowflake:
