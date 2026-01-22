@@ -1,24 +1,24 @@
 import asyncio
-import snowflake.connector
-import os
-import logging
 import json
-import yaml
+import logging
+import os
 from datetime import datetime
-from typing import Any, Dict, List, Optional
-from dotenv import load_dotenv
 from pathlib import Path
+from typing import Any
 
-from mcp.server.models import InitializationOptions
-import mcp.types as types
-from mcp.server import NotificationOptions, Server
-from pydantic import AnyUrl
 import mcp.server.stdio
+import mcp.types as types
+import snowflake.connector
+import yaml
+from dotenv import load_dotenv
+from mcp.server import NotificationOptions, Server
+from mcp.server.models import InitializationOptions
+from pydantic import AnyUrl
 
 # Charger les variables d'environnement depuis le fichier .env
 load_dotenv()
 
-def load_config() -> Dict[str, Any]:
+def load_config() -> dict[str, Any]:
     """
     Load configuration from config.yaml file.
     Falls back to default values if file is not found or has issues.
@@ -62,10 +62,10 @@ def load_config() -> Dict[str, Any]:
             }
         }
     }
-    
+
     try:
         if config_path.exists():
-            with open(config_path, 'r', encoding='utf-8') as f:
+            with open(config_path, encoding='utf-8') as f:
                 loaded_config = yaml.safe_load(f)
                 # Merge with default config to ensure all keys exist
                 def merge_configs(default, loaded):
@@ -89,17 +89,17 @@ CONFIG = load_config()
 def setup_logging():
     """Setup logging based on configuration."""
     log_config = CONFIG.get("logging", {})
-    
+
     # Convert string log level to logging constant
     log_level_str = log_config.get("level", "INFO").upper()
     log_level = getattr(logging, log_level_str, logging.INFO)
-    
+
     # Setup basic configuration
     log_format = log_config.get("format", "%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-    
+
     # Configure root logger
     logging.basicConfig(level=log_level, format=log_format, force=True)
-    
+
     # Setup file logging if enabled
     file_config = log_config.get("file_logging", {})
     if file_config.get("enabled", False):
@@ -107,7 +107,7 @@ def setup_logging():
             from logging.handlers import RotatingFileHandler
             log_file = Path(file_config.get("filename", "logs/server.log"))
             log_file.parent.mkdir(exist_ok=True)
-            
+
             file_handler = RotatingFileHandler(
                 log_file,
                 maxBytes=file_config.get("max_bytes", 10485760),
@@ -165,7 +165,7 @@ MCP_READ_ONLY = os.getenv("MCP_READ_ONLY", str(CONFIG["snowflake"]["read_only"])
 DEFAULT_QUERY_LIMIT = CONFIG["snowflake"]["default_query_limit"]
 MAX_QUERY_LIMIT = CONFIG["snowflake"]["max_query_limit"]
 
-def _safe_snowflake_execute(query: str, description: str = "Query") -> Dict[str, Any]:
+def _safe_snowflake_execute(query: str, description: str = "Query") -> dict[str, Any]:
     """
     Safely execute a Snowflake query with proper error handling and logging.
     """
@@ -174,7 +174,7 @@ def _safe_snowflake_execute(query: str, description: str = "Query") -> Dict[str,
         ctx = snowflake.connector.connect(**SNOWFLAKE_CONFIG)
         cur = ctx.cursor()
         cur.execute(query)
-        
+
         # Handle different query types
         if cur.description:
             rows = cur.fetchall()
@@ -182,30 +182,30 @@ def _safe_snowflake_execute(query: str, description: str = "Query") -> Dict[str,
             result = [dict(zip(columns, row)) for row in rows]
         else:
             result = {"status": "success", "rowcount": cur.rowcount}
-            
+
         cur.close()
         ctx.close()
         logger.info(f"{description} completed successfully")
         return {"success": True, "data": result}
-        
+
     except Exception as e:
         logger.error(f"{description} failed: {str(e)}")
         return {"success": False, "error": str(e), "data": None}
 
-def _format_markdown_table(data: List[Dict[str, Any]]) -> str:
+def _format_markdown_table(data: list[dict[str, Any]]) -> str:
     """Format query results as a markdown table."""
     if not data:
         return "No results found."
-    
+
     columns = list(data[0].keys())
     header = "| " + " | ".join(columns) + " |"
     separator = "|" + "---|" * len(columns)
-    
+
     rows = []
     for row in data:
         row_str = "| " + " | ".join(str(row.get(col, "")) for col in columns) + " |"
         rows.append(row_str)
-    
+
     return header + "\n" + separator + "\n" + "\n".join(rows)
 
 @server.list_resources()
@@ -215,7 +215,7 @@ async def handle_list_resources() -> list[types.Resource]:
     Each resource is exposed with appropriate URI schemes.
     """
     resources = []
-    
+
     # Add note resources
     for name in notes:
         resources.append(
@@ -226,7 +226,7 @@ async def handle_list_resources() -> list[types.Resource]:
                 mimeType="text/plain",
             )
         )
-    
+
     # Add Snowflake schema resource
     resources.append(
         types.Resource(
@@ -236,7 +236,7 @@ async def handle_list_resources() -> list[types.Resource]:
             mimeType="application/json",
         )
     )
-    
+
     # Add connection status resource
     resources.append(
         types.Resource(
@@ -246,7 +246,7 @@ async def handle_list_resources() -> list[types.Resource]:
             mimeType="application/json",
         )
     )
-    
+
     logger.info(f"Listed {len(resources)} resources")
     return resources
 
@@ -257,7 +257,7 @@ async def handle_read_resource(uri: AnyUrl) -> str:
     Supports multiple URI schemes: note://, snowflake://
     """
     logger.info(f"Reading resource: {uri}")
-    
+
     if uri.scheme == "note":
         name = uri.path
         if name is not None:
@@ -265,7 +265,7 @@ async def handle_read_resource(uri: AnyUrl) -> str:
             if name in notes:
                 return notes[name]
         raise ValueError(f"Note not found: {name}")
-    
+
     elif uri.scheme == "snowflake":
         if str(uri) == "snowflake://schema/metadata":
             # Return comprehensive schema metadata
@@ -279,7 +279,7 @@ async def handle_read_resource(uri: AnyUrl) -> str:
                 }, indent=2)
             else:
                 return json.dumps({"error": result["error"]}, indent=2)
-        
+
         elif str(uri) == "snowflake://status/connection":
             # Return connection status
             result = _safe_snowflake_execute("SELECT CURRENT_VERSION(), CURRENT_TIMESTAMP()", "Connection status")
@@ -299,7 +299,7 @@ async def handle_read_resource(uri: AnyUrl) -> str:
                     "read_only_mode": MCP_READ_ONLY
                 }
             return json.dumps(status_data, indent=2)
-    
+
     raise ValueError(f"Unsupported URI scheme or path: {uri}")
 
 @server.subscribe_resource()
@@ -310,10 +310,10 @@ async def handle_subscribe_resource(uri: AnyUrl) -> None:
     """
     uri_str = str(uri)
     logger.info(f"Subscribing to resource updates: {uri_str}")
-    
+
     if uri_str not in resource_subscriptions:
         resource_subscriptions[uri_str] = set()
-    
+
     # Add client to subscription (in a real implementation, you'd track client IDs)
     resource_subscriptions[uri_str].add("default_client")
 
@@ -324,7 +324,7 @@ async def handle_unsubscribe_resource(uri: AnyUrl) -> None:
     """
     uri_str = str(uri)
     logger.info(f"Unsubscribing from resource updates: {uri_str}")
-    
+
     if uri_str in resource_subscriptions:
         resource_subscriptions[uri_str].discard("default_client")
         if not resource_subscriptions[uri_str]:
@@ -408,24 +408,24 @@ async def handle_get_prompt(
     """
     logger.info(f"Generating prompt: {name} with arguments: {arguments}")
     args = arguments or {}
-    
+
     if name == "summarize-notes":
         style = args.get("style", "brief")
         format_type = args.get("format", "text")
         detail_prompt = " Give extensive details." if style == "detailed" else ""
         if style == "executive":
             detail_prompt = " Provide executive summary with key insights and actionable items."
-        
+
         notes_content = "\n".join(f"- {name}: {content}" for name, content in notes.items())
         if not notes_content:
             notes_content = "No notes available."
-        
+
         base_text = f"Here are the current notes to summarize:{detail_prompt}\n\n{notes_content}"
         if format_type == "json":
             base_text += "\n\nPlease format the response as JSON."
         elif format_type == "markdown":
             base_text += "\n\nPlease format the response as markdown."
-        
+
         return types.GetPromptResult(
             description="Summarize the current notes",
             messages=[
@@ -435,15 +435,15 @@ async def handle_get_prompt(
                 )
             ],
         )
-    
+
     elif name == "analyze-snowflake-schema":
         database = args.get("database", "all databases")
         focus = args.get("focus", "all")
-        
+
         # Get schema information
         result = _safe_snowflake_execute("SHOW DATABASES", "Schema analysis")
         schema_info = result["data"] if result["success"] else [{"error": result["error"]}]
-        
+
         prompt_text = f"""Analyze the following Snowflake database schema information:
         
 Target: {database}
@@ -458,7 +458,7 @@ Please provide insights about:
 - Data patterns and potential optimizations
 - Recommended queries or analysis approaches
 """
-        
+
         return types.GetPromptResult(
             description="Analyze Snowflake database schema",
             messages=[
@@ -468,15 +468,15 @@ Please provide insights about:
                 )
             ],
         )
-    
+
     elif name == "generate-sql-query":
         intent = args.get("intent", "general analysis")
         complexity = args.get("complexity", "simple")
-        
+
         # Get current schema context
         result = _safe_snowflake_execute("SHOW DATABASES", "Query generation context")
         schema_context = result["data"] if result["success"] else []
-        
+
         prompt_text = f"""Generate SQL queries for Snowflake based on the following requirements:
 
 Intent: {intent}
@@ -493,7 +493,7 @@ Please provide:
 
 Ensure queries are compatible with Snowflake SQL dialect.
 """
-        
+
         return types.GetPromptResult(
             description="Generate SQL query suggestions",
             messages=[
@@ -503,14 +503,14 @@ Ensure queries are compatible with Snowflake SQL dialect.
                 )
             ],
         )
-    
+
     elif name == "troubleshoot-connection":
         error_msg = args.get("error_message", "general connection issues")
-        
+
         # Get connection status
         status_result = _safe_snowflake_execute("SELECT CURRENT_VERSION()", "Connection test")
         connection_status = "Connected successfully" if status_result["success"] else f"Connection failed: {status_result['error']}"
-        
+
         prompt_text = f"""Help troubleshoot Snowflake connection issues:
 
 Error/Symptoms: {error_msg}
@@ -528,7 +528,7 @@ Please provide:
 4. How to verify the fix
 5. Prevention tips for the future
 """
-        
+
         return types.GetPromptResult(
             description="Troubleshoot Snowflake connection issues",
             messages=[
@@ -538,7 +538,7 @@ Please provide:
                 )
             ],
         )
-    
+
     raise ValueError(f"Unknown prompt: {name}")
 
 @server.list_tools()
@@ -589,7 +589,7 @@ async def handle_list_tools() -> list[types.Tool]:
                 "type": "object",
                 "properties": {
                     "sql": {
-                        "type": "string", 
+                        "type": "string",
                         "description": "SQL query to execute",
                         "minLength": 1,
                         "examples": ["SELECT CURRENT_TIMESTAMP()", "SHOW DATABASES"]
@@ -632,7 +632,7 @@ async def handle_list_tools() -> list[types.Tool]:
                         "examples": ["PROD_%", "%_DEV"]
                     },
                     "include_details": {
-                        "type": "boolean", 
+                        "type": "boolean",
                         "default": False,
                         "description": "Include database details and metadata"
                     }
@@ -680,7 +680,7 @@ async def handle_call_tool(
     """
     logger.info(f"Executing tool: {name} with arguments: {arguments}")
     args = arguments or {}
-    
+
     try:
         # Connection and metadata tools
         if name == "get-connection-info":
@@ -697,44 +697,45 @@ async def handle_call_tool(
                 return [types.TextContent(type="text", text=json.dumps(info, indent=2))]
             else:
                 return [types.TextContent(type="text", text=f"Connection error: {result['error']}")]
-        
+
         # Note management tools
         elif name == "add-note":
             note_name = args.get("name")
             content = args.get("content")
             if not note_name or not content:
                 raise ValueError("Both 'name' and 'content' are required")
-            
+
             old_content = notes.get(note_name)
             notes[note_name] = content
-            
+
             return [types.TextContent(type="text", text=f"Note '{note_name}' {'updated' if old_content else 'created'} successfully")]
-        
+
         elif name == "delete-note":
             note_name = args.get("name")
             if not note_name:
                 raise ValueError("'name' parameter is required")
-            
+
             if note_name in notes:
                 del notes[note_name]
                 return [types.TextContent(type="text", text=f"Note '{note_name}' deleted successfully")]
             else:
                 return [types.TextContent(type="text", text=f"Note '{note_name}' not found")]
-        
+
         # Enhanced Snowflake tools
         elif name == "execute-snowflake-sql":
             sql = args.get("sql")
             format_type = args.get("format", "json")
             if not sql:
                 raise ValueError("'sql' parameter is required")
-            
+
             result = _safe_snowflake_execute(sql, "SQL execution")
             if result["success"]:
                 if format_type == "markdown" and isinstance(result["data"], list):
                     output = _format_markdown_table(result["data"])
                 elif format_type == "csv" and isinstance(result["data"], list):
                     if result["data"]:
-                        import csv, io
+                        import csv
+                        import io
                         output_buffer = io.StringIO()
                         writer = csv.DictWriter(output_buffer, fieldnames=result["data"][0].keys())
                         writer.writeheader()
@@ -747,7 +748,7 @@ async def handle_call_tool(
                 return [types.TextContent(type="text", text=output)]
             else:
                 return [types.TextContent(type="text", text=f"Snowflake error: {result['error']}")]
-        
+
         elif name == "list-snowflake-warehouses":
             include_details = args.get("include_details", True)
             query = "SHOW WAREHOUSES"
@@ -761,15 +762,15 @@ async def handle_call_tool(
                 return [types.TextContent(type="text", text=output)]
             else:
                 return [types.TextContent(type="text", text=f"Snowflake error: {result['error']}")]
-        
+
         elif name == "list-databases":
             pattern = args.get("pattern")
             include_details = args.get("include_details", False)
-            
+
             query = "SHOW DATABASES"
             if pattern:
                 query += f" LIKE '{pattern}'"
-            
+
             result = _safe_snowflake_execute(query, "List databases")
             if result["success"]:
                 if include_details:
@@ -780,23 +781,23 @@ async def handle_call_tool(
                 return [types.TextContent(type="text", text=output)]
             else:
                 return [types.TextContent(type="text", text=f"Snowflake error: {result['error']}")]
-        
+
         elif name == "execute-query":
             sql = args.get("sql")
             if not sql:
                 raise ValueError("'sql' parameter is required")
-                
+
             read_only = args.get("read_only", MCP_READ_ONLY)
             format_type = args.get("format", "markdown")
             limit = args.get("limit")
-            
+
             # Check if query is allowed in read-only mode
             allowed_commands = ["SELECT", "SHOW", "DESCRIBE", "EXPLAIN", "WITH"]
             first_word = sql.strip().split()[0].upper() if sql.strip() else ""
-            
+
             if read_only and first_word not in allowed_commands:
                 return [types.TextContent(type="text", text="Only read-only queries are allowed in read-only mode.")]
-            
+
             # Apply limit if specified, or use default for SELECT queries
             if limit:
                 # Validate limit doesn't exceed maximum
@@ -807,10 +808,10 @@ async def handle_call_tool(
                 # Apply default limit for SELECT queries without explicit limit
                 limit = DEFAULT_QUERY_LIMIT
                 logger.info(f"Applying default limit {DEFAULT_QUERY_LIMIT} to SELECT query")
-            
+
             if limit and "LIMIT" not in sql.upper():
                 sql += f" LIMIT {limit}"
-            
+
             result = _safe_snowflake_execute(sql, "Execute query")
             if result["success"]:
                 if format_type == "markdown":
@@ -820,26 +821,26 @@ async def handle_call_tool(
                 return [types.TextContent(type="text", text=output)]
             else:
                 return [types.TextContent(type="text", text=f"Snowflake error: {result['error']}")]
-        
+
         elif name == "export-schema":
             database = args.get("database")
             format_type = args.get("format", "json")
             include_samples = args.get("include_data_samples", False)
-            
+
             schema_data = {"exported_at": datetime.now().isoformat(), "server_info": SERVER_INFO}
-            
+
             # Get database information
             if database:
                 db_query = f"SHOW DATABASES LIKE '{database}'"
             else:
                 db_query = "SHOW DATABASES"
-            
+
             db_result = _safe_snowflake_execute(db_query, "Export schema - databases")
             if not db_result["success"]:
                 return [types.TextContent(type="text", text=f"Error getting database info: {db_result['error']}")]
-            
+
             schema_data["databases"] = db_result["data"]
-            
+
             if format_type == "json":
                 output = json.dumps(schema_data, indent=2, default=str)
             elif format_type == "yaml":
@@ -853,12 +854,12 @@ async def handle_call_tool(
                 output += f"-- Server: {SERVER_INFO['name']} v{SERVER_INFO['version']}\n\n"
                 for db in schema_data["databases"]:
                     output += f"-- Database: {db.get('name', 'Unknown')}\n"
-            
+
             return [types.TextContent(type="text", text=output)]
-        
+
         else:
             raise ValueError(f"Unknown tool: {name}")
-    
+
     except Exception as e:
         logger.error(f"Tool execution failed: {name} - {str(e)}")
         return [types.TextContent(type="text", text=f"Tool execution error: {str(e)}")]
@@ -875,23 +876,23 @@ async def main():
     """Main entry point for the MCP server."""
     logger.info(f"Starting {SERVER_INFO['name']} v{SERVER_INFO['version']}")
     logger.info(f"Configuration: Read-only mode: {MCP_READ_ONLY}, Log level: {CONFIG['logging']['level']}")
-    
+
     # Test connection on startup if configured
     if CONFIG["server"]["connection"]["test_on_startup"]:
         await test_snowflake_connection()
-    
+
     # Get notification and experimental capabilities from config
     mcp_config = CONFIG["mcp"]
     notifications = mcp_config["notifications"]
     experimental = mcp_config["experimental_features"]
-    
+
     # Build experimental capabilities dict
     experimental_caps = {}
     if experimental.get("resource_subscriptions", False):
         experimental_caps["resourceSubscriptions"] = True
     if experimental.get("completion_support", False):
         experimental_caps["completionSupport"] = True
-    
+
     # Run the server using stdin/stdout streams
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
         await server.run(
