@@ -1,65 +1,63 @@
-# Makefile for simple-snowflake-mcp Docker operations
+.PHONY: help install dev test lint format clean docker-build docker-up docker-down
 
-.PHONY: help build up down logs shell clean dev-up dev-down prod-up prod-down
-
-# Default target
 help:
-	@echo "Available commands:"
-	@echo "  build      - Build the Docker image"
-	@echo "  up         - Start the service in development mode"
-	@echo "  down       - Stop the service"
-	@echo "  logs       - View service logs"
-	@echo "  shell      - Open a shell in the running container"
-	@echo "  clean      - Remove containers and images"
-	@echo "  dev-up     - Start the service in development mode with volume mounts"
-	@echo "  dev-down   - Stop the development service"
-	@echo "  prod-up    - Start the service in production mode"
-	@echo "  prod-down  - Stop the production service"
-	@echo "  test       - Run tests in Docker"
+	@echo "Commandes disponibles avec uv :"
+	@echo "  install        - Installer les dépendances de production"
+	@echo "  dev            - Installer toutes les dépendances (dev inclus)"
+	@echo "  test           - Lancer les tests"
+	@echo "  lint           - Vérifier le code avec ruff"
+	@echo "  format         - Formater le code avec ruff"
+	@echo "  run            - Lancer le serveur MCP"
+	@echo "  clean          - Nettoyer les fichiers générés"
+	@echo "  docker-build   - Build l'image Docker"
+	@echo "  docker-up      - Démarrer avec Docker Compose"
+	@echo "  docker-down    - Arrêter Docker Compose"
 
-# Build Docker image
+# Installation avec uv
+install:
+	uv sync --frozen
+
+dev:
+	uv sync --all-extras
+
+# Tests
+test:
+	uv run pytest tests/ -v --cov=src
+
+# Linting et formatting avec ruff
+lint:
+	uv run ruff check src/ tests/
+	uv run mypy src/
+
+format:
+	uv run ruff format src/ tests/
+	uv run ruff check --fix src/ tests/
+
+# Lancer le serveur
+run:
+	uv run simple-snowflake-mcp
+
+# Build
 build:
+	uv build
+
+# Clean
+clean:
+	rm -rf dist/ .pytest_cache/ .coverage .mypy_cache/ .ruff_cache/
+	find . -type d -name "__pycache__" -exec rm -rf {} +
+
+# Docker
+docker-build:
 	docker-compose build
 
-# Start development service (default)
-up:
+docker-up:
 	docker-compose up -d
 
-# Production mode with enhanced security
-prod-up:
-	docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
-
-# Stop production service
-prod-down:
-	docker-compose -f docker-compose.yml -f docker-compose.prod.yml down
-
-# Stop service
-down:
+docker-down:
 	docker-compose down
 
-# View logs
-logs:
+docker-logs:
 	docker-compose logs -f
 
-# Open shell in running container
-shell:
-	docker-compose exec simple-snowflake-mcp /bin/bash
-
-# Clean up Docker resources
-clean:
-	docker-compose down --rmi all --volumes --remove-orphans
-
-# Development mode with volume mounts
-dev-up:
-	docker-compose --profile dev up simple-snowflake-mcp-dev -d
-
-# Stop development service
-dev-down:
-	docker-compose --profile dev down
-
-# Run tests in Docker
-test:
-	docker-compose run --rm simple-snowflake-mcp python -m pytest tests/
-
 # Quick restart
-restart: down up
+restart: docker-down docker-up

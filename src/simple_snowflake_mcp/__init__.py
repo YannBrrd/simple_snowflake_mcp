@@ -1,5 +1,7 @@
-from . import server
 import asyncio
+
+from . import server
+
 
 def main():
     """Main entry point for the package."""
@@ -9,6 +11,7 @@ def main():
 __all__ = ['main', 'server']
 
 if __name__ == "__main__":
-    from .server import main
     import asyncio
+
+    from .server import main
     asyncio.run(main())

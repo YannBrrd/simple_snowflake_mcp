@@ -1,6 +1,7 @@
-import os
 import pytest
-from src.simple_snowflake_mcp import server
+
+from simple_snowflake_mcp import server
+
 
 @pytest.mark.asyncio
 async def test_list_snowflake_warehouses():

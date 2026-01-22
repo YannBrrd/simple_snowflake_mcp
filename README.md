@@ -98,11 +98,44 @@ Configuration values are resolved in this order (highest to lowest priority):
 3. Default `config.yaml` file
 4. Built-in defaults
 
-## Quickstart
+## 🚀 Installation Rapide
 
-### Install
+### Méthode 1 : Installation avec `uvx` (Recommandé)
 
-#### Claude Desktop
+```bash
+# Installation et exécution directe
+uvx simple-snowflake-mcp
+```
+
+### Méthode 2 : Installation depuis le code source
+
+```bash
+# Cloner le repo
+git clone https://github.com/YannBrrd/simple_snowflake_mcp
+cd simple_snowflake_mcp
+
+# Installer avec uv (crée automatiquement un venv)
+uv sync
+
+# Exécuter
+uv run simple-snowflake-mcp
+```
+
+### Méthode 3 : Développement
+
+```bash
+# Installer avec les dépendances de développement
+uv sync --all-extras
+
+# Lancer les tests
+uv run pytest
+
+# Linter avec ruff
+uv run ruff check .
+uv run ruff format .
+```
+
+### Configuration Claude Desktop
 
 On MacOS: `~/Library/Application\ Support/Claude/claude_desktop_config.json`
 
@@ -112,13 +145,13 @@ On Windows: `%APPDATA%/Claude/claude_desktop_config.json`
   <summary>Development/Unpublished Servers Configuration</summary>
 
 
-  ```
+  ```json
   "mcpServers": {
     "simple_snowflake_mcp": {
       "command": "uv",
       "args": [
         "--directory",
-        ".", // Use current directory for GitHub
+        ".", 
         "run",
         "simple_snowflake_mcp"
       ]
@@ -130,7 +163,7 @@ On Windows: `%APPDATA%/Claude/claude_desktop_config.json`
 <details>
   <summary>Published Servers Configuration</summary>
 
-  ```
+  ```json
   "mcpServers": {
     "simple_snowflake_mcp": {
       "command": "uvx",
@@ -255,34 +288,35 @@ docker-compose --profile dev up simple-snowflake-mcp-dev -d
 
 This allows you to make changes to the code without rebuilding the Docker image.
 
-## Development
+## Développement
 
-### Building and Publishing
+### Installation des dépendances
 
-To prepare the package for distribution:
-
-1. Sync dependencies and update lockfile:
 ```bash
-uv sync
+# Synchroniser toutes les dépendances (prod + dev)
+uv sync --all-extras
+
+# Mettre à jour les dépendances
+uv lock --upgrade
+
+# Ajouter une nouvelle dépendance
+uv add <package-name>
+
+# Ajouter une dépendance de dev
+uv add --dev <package-name>
 ```
 
-2. Build package distributions:
+### Build et Publication
+
 ```bash
+# Build
 uv build
+
+# Publier sur PyPI
+uv publish --token $UV_PUBLISH_TOKEN
 ```
 
-This will create source and wheel distributions in the `dist/` directory.
-
-3. Publish to PyPI:
-```bash
-uv publish
-```
-
-Note: You'll need to set PyPI credentials via environment variables or command flags:
-- Token: `--token` or `UV_PUBLISH_TOKEN`
-- Or username/password: `--username`/`UV_PUBLISH_USERNAME` and `--password`/`UV_PUBLISH_PASSWORD`
-
-### Debugging
+### Debugging avec MCP Inspector
 
 Since MCP servers run over stdio, debugging can be challenging. For the best debugging
 experience, we strongly recommend using the [MCP Inspector](https://github.com/modelcontextprotocol/inspector).
@@ -290,7 +324,7 @@ experience, we strongly recommend using the [MCP Inspector](https://github.com/m
 You can launch the MCP Inspector via [`npm`](https://docs.npmjs.com/downloading-and-installing-node-js-and-npm) with this command:
 
 ```bash
-npx @modelcontextprotocol/inspector uv --directory . run simple-snowflake-mcp
+npx @modelcontextprotocol/inspector uv run simple-snowflake-mcp
 ```
 
 Upon launching, the Inspector will display a URL that you can access in your browser to begin debugging.
@@ -313,52 +347,52 @@ Example:
 
 The result will be returned in the MCP response.
 
-## Installation and configuration in VS Code
+## Installation et configuration dans VS Code
 
-1. **Clone the project and install dependencies**
+1. **Cloner le projet et installer les dépendances**
    ```sh
-   git clone <your-repo>
+   git clone https://github.com/YannBrrd/simple_snowflake_mcp
    cd simple_snowflake_mcp
-   python -m venv .venv
-   .venv/Scripts/activate  # Windows
-   pip install -r requirements.txt  # or `uv sync --dev --all-extras` if available
+   
+   # Installer avec uv (crée automatiquement un venv)
+   uv sync --all-extras
    ```
 
-2. **Configure Snowflake access**
-   - Copy `.env.example` to `.env` (or create `.env` at the root) and fill in your credentials:
+2. **Configurer l'accès Snowflake**
+   - Copier `.env.example` vers `.env` et remplir vos credentials :
      ```env
      SNOWFLAKE_USER=...
      SNOWFLAKE_PASSWORD=...
      SNOWFLAKE_ACCOUNT=...
-     # SNOWFLAKE_WAREHOUSE   Optional: Snowflake warehouse name
-     # SNOWFLAKE_DATABASE    Optional: default database name
-     # SNOWFLAKE_SCHEMA      Optional: default schema name
-     # MCP_READ_ONLY=true|false   Optional: true/false to force read-only mode
+     # SNOWFLAKE_WAREHOUSE   Optionnel: Nom du warehouse Snowflake
+     # SNOWFLAKE_DATABASE    Optionnel: Nom de la base par défaut
+     # SNOWFLAKE_SCHEMA      Optionnel: Nom du schéma par défaut
+     # MCP_READ_ONLY=true|false   Optionnel: true/false pour forcer le mode lecture seule
      ```
 
-3. **Configure the server (v0.2.0)**
-   - The server will automatically create a default `config.yaml` file on first run
-   - Customize logging, limits, and MCP features by editing `config.yaml`
-   - Use `CONFIG_FILE=custom_config.yaml` to specify a different configuration file
+3. **Configurer le serveur (v0.2.0)**
+   - Le serveur créera automatiquement un fichier `config.yaml` par défaut au premier lancement
+   - Personnalisez le logging, les limites et les fonctionnalités MCP en éditant `config.yaml`
+   - Utilisez `CONFIG_FILE=custom_config.yaml` pour spécifier un fichier de configuration différent
 
-4. **Configure VS Code for MCP debugging**
-   - The `.vscode/mcp.json` file is already present:
+4. **Configurer VS Code pour le debugging MCP**
+   - Le fichier `.vscode/mcp.json` est déjà présent :
      ```json
      {
        "servers": {
          "simple-snowflake-mcp": {
            "type": "stdio",
-           "command": ".venv/Scripts/python.exe",
-           "args": ["-m", "simple_snowflake_mcp"]
+           "command": "uv",
+           "args": ["run", "simple-snowflake-mcp"]
          }
        }
      }
      ```
-   - Open the command palette (Ctrl+Shift+P), type `MCP: Start Server` and select `simple-snowflake-mcp`.
+   - Ouvrir la palette de commandes (Ctrl+Shift+P), taper `MCP: Start Server` et sélectionner `simple-snowflake-mcp`.
 
-5. **Usage**
-   - The exposed MCP tools allow you to query Snowflake (list-databases, list-views, describe-view, query-view, execute-query, etc.).
-   - For more examples, see the MCP protocol documentation: https://github.com/modelcontextprotocol/create-python-server
+5. **Utilisation**
+   - Les outils MCP exposés vous permettent d'interroger Snowflake (list-databases, list-views, describe-view, query-view, execute-query, etc.).
+   - Pour plus d'exemples, voir la documentation du protocole MCP : https://github.com/modelcontextprotocol/create-python-server
 
 ## Enhanced MCP Features (v0.2.0)
 
