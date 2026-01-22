@@ -1,41 +1,40 @@
-# Use Python 3.11 slim image (distroless would be more secure but requires more setup)
-FROM python:3.11-slim-bookworm
+# Multi-stage build optimisé avec uv
+FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim AS builder
 
-# Set working directory
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
-    && rm -rf /var/lib/apt/lists/*
+# Copier les fichiers de dépendances
+COPY pyproject.toml uv.lock ./
 
-# Copy dependency files
-COPY requirements.txt pyproject.toml uv.lock ./
+# Installer les dépendances avec uv (beaucoup plus rapide)
+RUN uv sync --frozen --no-dev --no-install-project
 
-# Install uv for faster package management
-RUN pip install uv
-
-# Install dependencies using uv
-RUN uv pip install --system -r requirements.txt
-
-# Copy source code
+# Copier le code source
 COPY src/ ./src/
-COPY setup.py ./
 
-# Install the package
-RUN pip install -e .
+# Installer le projet
+RUN uv sync --frozen --no-dev
 
-# Create a non-root user
-RUN useradd --create-home --shell /bin/bash mcp
+# Stage de production
+FROM python:3.11-slim-bookworm AS production
+
+WORKDIR /app
+
+# Copier l'environnement virtuel depuis le builder
+COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder /app/src /app/src
+
+# Créer un utilisateur non-root
+RUN groupadd -r -g 1001 mcp && \
+    useradd -r -g mcp -u 1001 -m -s /bin/bash mcp && \
+    chown -R mcp:mcp /app
+
 USER mcp
 
-# Expose port (if your MCP server needs to listen on a port)
-# EXPOSE 8000
-
-# Set environment variables
-ENV PYTHONPATH=/app/src
+# Ajouter le venv au PATH
+ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
 
-# Default command
-CMD ["python", "-m", "simple_snowflake_mcp"]
+# Commande par défaut
+CMD ["simple-snowflake-mcp"]

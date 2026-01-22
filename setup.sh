@@ -1,54 +1,31 @@
 #!/bin/bash
-
-# Setup script for simple-snowflake-mcp Docker environment
-
 set -e
 
-echo "🐋 Setting up simple-snowflake-mcp Docker environment..."
+echo "🚀 Configuration de simple-snowflake-mcp avec uv..."
 
-# Check if Docker is installed
-if ! command -v docker &> /dev/null; then
-    echo "❌ Docker is not installed. Please install Docker first."
-    exit 1
+# Vérifier si uv est installé
+if ! command -v uv &> /dev/null; then
+    echo "📦 Installation de uv..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    echo "✅ uv installé"
 fi
 
-# Check if Docker Compose is installed
-if ! command -v docker-compose &> /dev/null; then
-    echo "❌ Docker Compose is not installed. Please install Docker Compose first."
-    exit 1
-fi
-
-# Create .env file if it doesn't exist
+# Créer .env si nécessaire
 if [ ! -f .env ]; then
-    echo "📝 Creating .env file from template..."
+    echo "📝 Création du fichier .env..."
     cp .env.example .env
-    echo "✅ .env file created. Please edit it with your Snowflake credentials."
-    echo "   Required variables: SNOWFLAKE_USER, SNOWFLAKE_PASSWORD, SNOWFLAKE_ACCOUNT"
-else
-    echo "✅ .env file already exists"
+    echo "⚠️  Merci d'éditer .env avec vos credentials Snowflake"
 fi
 
-# Create logs directory
-mkdir -p logs
-echo "✅ Logs directory created"
-
-# Build the Docker image
-echo "🔨 Building Docker image..."
-docker-compose build
+# Installer les dépendances
+echo "📦 Installation des dépendances..."
+uv sync
 
 echo ""
-echo "🎉 Setup complete!"
+echo "✅ Configuration terminée !"
 echo ""
-echo "Next steps:"
-echo "1. Edit .env file with your Snowflake credentials"
-echo "2. Run 'docker-compose up -d' or 'make up' to start the service"
-echo "3. Run 'docker-compose logs -f' or 'make logs' to view logs"
-echo ""
-echo "Available commands:"
-echo "  make help       - Show all available commands"
-echo "  make up         - Start in development mode"
-echo "  make prod-up    - Start in production mode"
-echo "  make dev-up     - Start with code volume mounts"
-echo "  make logs       - View logs"
-echo "  make down       - Stop the service"
-echo ""
+echo "Commandes disponibles :"
+echo "  uv run simple-snowflake-mcp    - Lancer le serveur"
+echo "  uv run pytest                   - Lancer les tests"
+echo "  uv sync --all-extras            - Installer les dépendances de dev"
+echo "  make help                       - Voir toutes les commandes"

@@ -4,13 +4,6 @@ version = "0.2.0"
 description = "Simple Snowflake MCP Server to work behind a corporate proxy"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = [
-    "mcp>=1.10.1",
-    "snowflake-connector-python",
-    "python-dotenv",
-    "pydantic",
-    "PyYAML"
-]
 authors = [
     { name = "Yann Barraud", email = "yann@barraud.io" }
 ]
@@ -21,10 +14,38 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
+dependencies = [
+    "mcp>=1.10.1",
+    "snowflake-connector-python>=3.6.0",
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.0.0",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.1.0",
+    "mypy>=1.8.0",
+]
 
 [build-system]
-requires = [ "hatchling",]
+requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project.scripts]
 simple-snowflake-mcp = "simple_snowflake_mcp:main"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"

@@ -2,8 +2,8 @@
   "servers": {
     "simple-snowflake-mcp": {
       "type": "stdio",
-      "command": ".venv/Scripts/python.exe",
-      "args": ["-m", "simple_snowflake_mcp.server"]
+      "command": "uv",
+      "args": ["run", "simple-snowflake-mcp"]
     }
   }
 }
