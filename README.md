@@ -394,6 +394,10 @@ The result will be returned in the MCP response.
    - Les outils MCP exposés vous permettent d'interroger Snowflake (list-databases, list-views, describe-view, query-view, execute-query, etc.).
    - Pour plus d'exemples, voir la documentation du protocole MCP : https://github.com/modelcontextprotocol/create-python-server
 
+## Hosted deployment
+
+A hosted deployment is available on [Fronteir AI](https://fronteir.ai/mcp/yannbrrd-simple-snowflake-mcp).
+
 ## Enhanced MCP Features (v0.2.0)
 
 ### Advanced MCP Protocol Support
