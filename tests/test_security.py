@@ -25,6 +25,12 @@ from simple_snowflake_mcp import server
         "WITH x AS (SELECT 1) SELECT * FROM x",
         "/* comment */ SELECT 1",
         "-- lead comment\nSELECT 1",
+        # Comment characters inside string literals are data, not comments.
+        "SELECT '/*' AS a, b FROM t WHERE c = '*/ ; x'",
+        "SELECT 'a -- b' AS note FROM t",
+        # Semicolon inside a (tagged) dollar-quoted body is data, not a separator.
+        "SELECT $body$a;b$body$ AS x",
+        "SELECT $$a;b$$ AS x",
     ],
 )
 def test_read_only_accepts_reads(sql):
@@ -47,6 +53,9 @@ def test_read_only_accepts_reads(sql):
         "SELECT 1; DROP TABLE t",
         # Comment cannot smuggle a write past the first-keyword check.
         "/* SELECT */ DELETE FROM t",
+        # A real semicolon outside any literal makes this multi-statement; the
+        # leading string literal must not hide the trailing DROP via the '--'.
+        "SELECT 'a -- '; DROP TABLE t",
         "",
         "   ",
     ],
@@ -88,6 +97,14 @@ def test_limit_string_is_coerced(monkeypatch):
 def test_limit_invalid_raises():
     with pytest.raises(ValueError):
         server._coerce_limit("1 UNION SELECT password", "SELECT 1")
+
+
+def test_limit_bool_rejected():
+    # bool is a subclass of int; True must not silently become a limit of 1.
+    with pytest.raises(ValueError):
+        server._coerce_limit(True, "SELECT * FROM t")
+    with pytest.raises(ValueError):
+        server._coerce_limit(False, "SELECT * FROM t")
 
 
 def test_default_limit_applied_to_bare_select(monkeypatch):
@@ -280,3 +297,76 @@ async def test_note_count_is_capped(monkeypatch):
 
     assert "limit reached" in result[0].text.lower()
     server.notes.clear()
+
+
+# ---------------------------------------------------------------------------
+# Connection liveness: a stale reused connection is retried once
+# ---------------------------------------------------------------------------
+async def test_stale_connection_reconnects_and_retries(make_connection, monkeypatch):
+    import snowflake.connector.errors as sferr
+
+    # Simulate a connection cached from a prior call that has since gone stale.
+    stale = make_connection()
+    stale.cursor.return_value.__enter__.return_value.execute.side_effect = sferr.OperationalError(
+        "network gone"
+    )
+    server._connection = stale
+
+    fresh = make_connection(columns=["N"], rows=[("1",)])
+    monkeypatch.setattr(server.snowflake.connector, "connect", lambda **kw: fresh)
+
+    result = await server.handle_call_tool("execute-query", {"sql": "SELECT 1 AS N"})
+
+    assert result[0].text.startswith("| N |")
+    stale.close.assert_called()  # the stale connection was discarded
+
+
+async def test_fresh_connection_error_is_not_retried(monkeypatch):
+    """A brand-new connection failing must NOT loop; surfaces a generic error."""
+    import snowflake.connector.errors as sferr
+
+    server._connection = None  # no cached connection -> first use is fresh
+    calls = {"n": 0}
+
+    def _connect(**kw):
+        calls["n"] += 1
+        raise sferr.OperationalError("cannot reach host")
+
+    monkeypatch.setattr(server.snowflake.connector, "connect", _connect)
+
+    result = await server.handle_call_tool("execute-query", {"sql": "SELECT 1"})
+
+    assert "error" in result[0].text.lower()
+    assert calls["n"] == 1  # connected once, no retry storm
+
+
+# ---------------------------------------------------------------------------
+# Config validation: malformed server.connection must not crash (SEC-M4)
+# ---------------------------------------------------------------------------
+def test_validate_config_normalizes_malformed_server_connection():
+    cfg = server._validate_config({"server": {"connection": None}})
+    assert isinstance(cfg["server"]["connection"], dict)
+    assert cfg["server"]["connection"]["timeout"] == 30
+    assert cfg["server"]["connection"]["test_on_startup"] is True
+
+
+def test_validate_config_tolerates_scalar_subtrees():
+    cfg = server._validate_config({"server": "oops", "snowflake": None})
+    assert isinstance(cfg["server"]["connection"], dict)
+    assert cfg["snowflake"]["read_only"] is True
+
+
+# ---------------------------------------------------------------------------
+# execute-snowflake-sql applies the same default row cap as execute-query
+# ---------------------------------------------------------------------------
+async def test_execute_snowflake_sql_applies_default_cap(
+    make_connection, patch_connect, monkeypatch
+):
+    monkeypatch.setattr(server, "DEFAULT_QUERY_LIMIT", 1000)
+    conn = make_connection(columns=["N"], rows=[("1",)])
+    patch_connect(conn)
+
+    await server.handle_call_tool("execute-snowflake-sql", {"sql": "SELECT * FROM big"})
+
+    cur = conn.cursor.return_value.__enter__.return_value
+    cur.fetchmany.assert_called_once_with(1000)
