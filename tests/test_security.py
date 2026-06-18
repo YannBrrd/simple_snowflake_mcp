@@ -86,33 +86,35 @@ def test_invalid_like_patterns_raise(value):
 # ---------------------------------------------------------------------------
 def test_limit_clamped_to_max(monkeypatch):
     monkeypatch.setattr(server, "MAX_QUERY_LIMIT", 50)
-    assert server._coerce_limit(10_000, "SELECT 1") == 50
+    assert server._coerce_limit(10_000) == 50
 
 
 def test_limit_string_is_coerced(monkeypatch):
     monkeypatch.setattr(server, "MAX_QUERY_LIMIT", 50000)
-    assert server._coerce_limit("25", "SELECT 1") == 25
+    assert server._coerce_limit("25") == 25
 
 
 def test_limit_invalid_raises():
     with pytest.raises(ValueError):
-        server._coerce_limit("1 UNION SELECT password", "SELECT 1")
+        server._coerce_limit("1 UNION SELECT password")
 
 
 def test_limit_bool_rejected():
     # bool is a subclass of int; True must not silently become a limit of 1.
     with pytest.raises(ValueError):
-        server._coerce_limit(True, "SELECT * FROM t")
+        server._coerce_limit(True)
     with pytest.raises(ValueError):
-        server._coerce_limit(False, "SELECT * FROM t")
+        server._coerce_limit(False)
 
 
 def test_default_limit_applied_to_bare_select(monkeypatch):
     monkeypatch.setattr(server, "DEFAULT_QUERY_LIMIT", 1000)
-    assert server._coerce_limit(None, "SELECT * FROM t") == 1000
+    # No explicit client limit means the chokepoint applies the default cap.
+    assert server._coerce_limit(None) is None
+    assert server._default_row_cap("SELECT * FROM t") == 1000
     # A query that already constrains itself is left alone.
-    assert server._coerce_limit(None, "SELECT * FROM t LIMIT 5") is None
-    assert server._coerce_limit(None, "SHOW DATABASES") is None
+    assert server._default_row_cap("SELECT * FROM t LIMIT 5") is None
+    assert server._default_row_cap("SHOW DATABASES") is None
 
 
 # ---------------------------------------------------------------------------
@@ -209,13 +211,13 @@ def test_read_only_does_not_false_reject(sql):
 # ---------------------------------------------------------------------------
 def test_default_limit_covers_cte_reads(monkeypatch):
     monkeypatch.setattr(server, "DEFAULT_QUERY_LIMIT", 1000)
-    assert server._coerce_limit(None, "WITH x AS (SELECT * FROM t) SELECT * FROM x") == 1000
+    assert server._default_row_cap("WITH x AS (SELECT * FROM t) SELECT * FROM x") == 1000
 
 
 def test_default_limit_not_suppressed_by_limit_substring(monkeypatch):
     monkeypatch.setattr(server, "DEFAULT_QUERY_LIMIT", 1000)
     # "delimiter_col" contains the substring LIMIT but no LIMIT clause.
-    assert server._coerce_limit(None, "SELECT delimiter_col FROM t") == 1000
+    assert server._default_row_cap("SELECT delimiter_col FROM t") == 1000
 
 
 def test_valid_dollar_identifier_pattern():
@@ -369,4 +371,37 @@ async def test_execute_snowflake_sql_applies_default_cap(
     await server.handle_call_tool("execute-snowflake-sql", {"sql": "SELECT * FROM big"})
 
     cur = conn.cursor.return_value.__enter__.return_value
-    cur.fetchmany.assert_called_once_with(1000)
+    # One extra row is fetched so truncation can be detected (then trimmed back).
+    cur.fetchmany.assert_called_once_with(1001)
+
+
+# ---------------------------------------------------------------------------
+# Capped results are reported, never silently dropped
+# ---------------------------------------------------------------------------
+async def test_truncation_is_reported_and_rows_trimmed(make_connection, patch_connect, monkeypatch):
+    monkeypatch.setattr(server, "DEFAULT_QUERY_LIMIT", 2)
+    # The mock returns 3 rows regardless of the fetchmany size, simulating a
+    # result larger than the cap (the chokepoint fetches cap+1 to detect this).
+    conn = make_connection(columns=["N"], rows=[("1",), ("2",), ("3",)])
+    patch_connect(conn)
+
+    result = await server.handle_call_tool(
+        "execute-query", {"sql": "SELECT * FROM big", "format": "json"}
+    )
+
+    import json as _json
+
+    data = _json.loads(result[0].text)
+    assert len(data) == 2  # trimmed back to the cap
+    # A second content block warns that the result was truncated.
+    assert any("truncated" in c.text.lower() for c in result[1:])
+
+
+async def test_no_truncation_notice_when_within_cap(make_connection, patch_connect, monkeypatch):
+    monkeypatch.setattr(server, "DEFAULT_QUERY_LIMIT", 1000)
+    conn = make_connection(columns=["N"], rows=[("1",)])
+    patch_connect(conn)
+
+    result = await server.handle_call_tool("execute-query", {"sql": "SELECT 1 AS N"})
+
+    assert all("truncated" not in c.text.lower() for c in result)
