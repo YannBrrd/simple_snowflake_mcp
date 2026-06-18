@@ -1,5 +1,4 @@
 # Simple Snowflake MCP server
-[![Trust Score](https://archestra.ai/mcp-catalog/api/badge/quality/YannBrrd/simple_snowflake_mcp)](https://archestra.ai/mcp-catalog/yannbrrd__simple_snowflake_mcp)
 
 **Enhanced Snowflake MCP Server with comprehensive configuration system and full MCP protocol compliance.**
 
