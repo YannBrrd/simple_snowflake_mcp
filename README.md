@@ -4,18 +4,7 @@
 
 A production-ready MCP server that provides seamless Snowflake integration with advanced features including configurable logging, resource subscriptions, and comprehensive error handling. Designed to work seamlessly behind corporate proxies.
 
-## 🆕 What's new in v0.3.0
-
-This release focuses on security hardening and reliability. See [CHANGELOG.md](CHANGELOG.md) for the full list.
-
-- **Server-governed read-only mode.** Read-only is decided solely by server config / `MCP_READ_ONLY`; the client `read_only` argument has been **removed**. All SQL funnels through one guard that strips comments and rejects multi-statement and CTE-fronted DML.
-- **No silent data loss.** Row-producing reads without a `LIMIT` are capped at `default_query_limit`, and a capped result now returns an explicit *"results were truncated"* notice instead of dropping rows silently.
-- **Stays responsive under load.** Blocking Snowflake I/O runs on a worker thread, plus an in-process rate limit and a server-side statement timeout.
-- **Hardened inputs.** `pattern`/`database` are allow-list validated before `LIKE`; `limit` is a bounded integer applied at the driver (never concatenated into SQL). Snowflake errors are not leaked to clients.
-- **New `security` config block** (`rate_limit`, `notes` bounds) and `snowflake.statement_timeout_seconds` / `connection_reuse`.
-- Documentation and in-code comments are now entirely in English.
-
-> ⚠️ **Breaking:** the client `read_only` tool argument has been removed — read-only mode is now governed solely by the server. `execute-snowflake-sql` is now subject to the read-only guard (it was previously unguarded), so write/DDL statements are rejected while the server is in read-only mode. (The README previously documented several tools — `query-view`, `list-schemas`, `describe-table`, etc. — that were never actually implemented; the tool list above reflects what the server really exposes.)
+For release details, see [CHANGELOG.md](CHANGELOG.md).
 
 ### Tools
 
@@ -74,7 +63,7 @@ deploy accordingly.
   with a reference id is returned and full detail is logged server-side.
 - Query text is not logged at `INFO` (only a length + hash); full SQL is `DEBUG`-only.
 
-## 🆕 Configuration System (v0.2.0)
+## 🆕 Configuration System
 
 The server now includes a comprehensive YAML-based configuration system that allows you to customize all aspects of the server behavior.
 
