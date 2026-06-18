@@ -25,6 +25,7 @@ load_dotenv()
 
 # Repository root, used to constrain where configuration files may be loaded from.
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+LOGS_ROOT = (REPO_ROOT / "logs").resolve()
 
 # Built-in defaults. Extracted from load_config() so the baseline configuration
 # lives in one named place rather than buried in the loader (CQ-L4).
@@ -125,6 +126,23 @@ def _resolve_config_path() -> Path | None:
         print(f"CONFIG_FILE '{config_file}' resolves outside the repository; ignoring it.")
         candidate = (REPO_ROOT / "config.yaml").resolve()
     return candidate
+
+
+def _resolve_log_file_path(path_value: Any) -> Path:
+    """
+    Resolve file logging target under REPO_ROOT/logs, rejecting traversal/escape.
+
+    Relative paths are resolved from REPO_ROOT. Absolute or relative values that
+    escape LOGS_ROOT are rejected and replaced with the default log file.
+    """
+    default_path = (LOGS_ROOT / "server.log").resolve()
+    raw_path = path_value if isinstance(path_value, (str, Path)) else "logs/server.log"
+    candidate = Path(raw_path)
+    resolved = candidate.resolve() if candidate.is_absolute() else (REPO_ROOT / candidate).resolve()
+    if not resolved.is_relative_to(LOGS_ROOT):
+        print(f"Log filename '{raw_path}' resolves outside '{LOGS_ROOT}'; using default log path.")
+        return default_path
+    return resolved
 
 
 def _ensure_dict(parent: dict[str, Any], key: str) -> dict[str, Any]:
@@ -258,8 +276,8 @@ def setup_logging():
         try:
             from logging.handlers import RotatingFileHandler
 
-            log_file = Path(file_config.get("filename", "logs/server.log"))
-            log_file.parent.mkdir(exist_ok=True)
+            log_file = _resolve_log_file_path(file_config.get("filename", "logs/server.log"))
+            log_file.parent.mkdir(parents=True, exist_ok=True)
 
             file_handler = RotatingFileHandler(
                 log_file,
@@ -304,6 +322,7 @@ MAX_QUERY_LIMIT = CONFIG["snowflake"]["max_query_limit"]
 STATEMENT_TIMEOUT_SECONDS = CONFIG["snowflake"]["statement_timeout_seconds"]
 CONNECTION_REUSE = CONFIG["snowflake"]["connection_reuse"]
 CONNECTION_TIMEOUT = CONFIG["server"]["connection"].get("timeout", 30)
+_SCHEMA_SAMPLE_ROW_LIMIT = 3
 
 # Required Snowflake credential keys.
 _REQUIRED_SNOWFLAKE_KEYS = ("user", "password", "account")
@@ -1348,6 +1367,131 @@ async def _run_user_query(
     return contents
 
 
+def _quote_identifier_part(name: str) -> str:
+    """Quote one Snowflake identifier part safely using double-quote escaping."""
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _qualified_identifier(*parts: str) -> str:
+    """Build a fully-qualified Snowflake identifier with quoted parts."""
+    clean_parts = [part for part in parts if part]
+    return ".".join(_quote_identifier_part(part) for part in clean_parts)
+
+
+async def _describe_schema_object(
+    object_type: str, database: str, schema: str, object_name: str
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Describe a table/view and return (columns, error)."""
+    identifier = _qualified_identifier(database, schema, object_name)
+    result = await _execute(
+        f"DESCRIBE {object_type} {identifier}",
+        f"Export schema - describe {object_type.lower()} {database}.{schema}.{object_name}",
+        row_limit=MAX_QUERY_LIMIT,
+    )
+    if not result["success"]:
+        return [], result["error"]
+    return result["data"], None
+
+
+async def _export_schema_metadata(
+    database_filter: str | None, include_data_samples: bool
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Export hierarchical Snowflake metadata (databases/schemas/tables/views)."""
+    schema_data: dict[str, Any] = {
+        "exported_at": datetime.now().isoformat(),
+        "server_info": SERVER_INFO,
+        "include_data_samples": include_data_samples,
+    }
+    if include_data_samples:
+        schema_data["sample_row_limit"] = _SCHEMA_SAMPLE_ROW_LIMIT
+
+    if database_filter:
+        db_query = f"SHOW DATABASES LIKE '{validate_like_pattern(database_filter, 'database')}'"
+    else:
+        db_query = "SHOW DATABASES"
+
+    db_result = await _execute(db_query, "Export schema - databases", row_limit=MAX_QUERY_LIMIT)
+    if not db_result["success"]:
+        return None, f"Error getting database info: {db_result['error']}"
+
+    databases: list[dict[str, Any]] = []
+    for db_row in db_result["data"]:
+        db_name = db_row.get("name")
+        if not db_name:
+            continue
+        db_entry: dict[str, Any] = {"name": db_name, "schemas": []}
+
+        schemas_result = await _execute(
+            f"SHOW SCHEMAS IN DATABASE {_quote_identifier_part(db_name)}",
+            f"Export schema - schemas in {db_name}",
+            row_limit=MAX_QUERY_LIMIT,
+        )
+        if not schemas_result["success"]:
+            return None, (
+                f"Error getting schema info for database {db_name}: {schemas_result['error']}"
+            )
+
+        for schema_row in schemas_result["data"]:
+            schema_name = schema_row.get("name")
+            if not schema_name:
+                continue
+
+            schema_entry: dict[str, Any] = {"name": schema_name, "tables": [], "views": []}
+            schema_identifier = _qualified_identifier(db_name, schema_name)
+
+            for show_sql, object_type, key in (
+                (f"SHOW TABLES IN SCHEMA {schema_identifier}", "TABLE", "tables"),
+                (f"SHOW VIEWS IN SCHEMA {schema_identifier}", "VIEW", "views"),
+            ):
+                objects_result = await _execute(
+                    show_sql,
+                    f"Export schema - {key} in {db_name}.{schema_name}",
+                    row_limit=MAX_QUERY_LIMIT,
+                )
+                if not objects_result["success"]:
+                    return None, (
+                        f"Error getting {key} for schema {db_name}.{schema_name}: "
+                        f"{objects_result['error']}"
+                    )
+
+                for object_row in objects_result["data"]:
+                    object_name = object_row.get("name")
+                    if not object_name:
+                        continue
+
+                    object_entry: dict[str, Any] = {"name": object_name}
+                    columns, describe_error = await _describe_schema_object(
+                        object_type, db_name, schema_name, object_name
+                    )
+                    if describe_error:
+                        return None, (
+                            f"Error describing {object_type.lower()} "
+                            f"{db_name}.{schema_name}.{object_name}: {describe_error}"
+                        )
+                    object_entry["columns"] = columns
+
+                    if include_data_samples and object_type == "TABLE":
+                        object_identifier = _qualified_identifier(db_name, schema_name, object_name)
+                        sample_result = await _execute(
+                            f"SELECT * FROM {object_identifier} LIMIT {_SCHEMA_SAMPLE_ROW_LIMIT}",
+                            (f"Export schema - sample {db_name}.{schema_name}.{object_name}"),
+                            row_limit=_SCHEMA_SAMPLE_ROW_LIMIT,
+                        )
+                        if not sample_result["success"]:
+                            object_entry["sample_data_error"] = sample_result["error"]
+                        else:
+                            object_entry["sample_data"] = sample_result["data"]
+
+                    schema_entry[key].append(object_entry)
+
+            db_entry["schemas"].append(schema_entry)
+
+        databases.append(db_entry)
+
+    schema_data["databases"] = databases
+    return schema_data, None
+
+
 @server.call_tool()
 async def handle_call_tool(
     name: str, arguments: dict | None
@@ -1471,32 +1615,34 @@ async def handle_call_tool(
         elif name == "export-schema":
             database = args.get("database")
             format_type = args.get("format", "json")
+            include_data_samples_raw = args.get("include_data_samples", False)
+            if not isinstance(include_data_samples_raw, bool):
+                raise ValueError("'include_data_samples' must be a boolean")
+            include_data_samples = include_data_samples_raw
+            if format_type not in {"json", "yaml", "sql"}:
+                raise ValueError("'format' must be one of: json, yaml, sql")
 
-            schema_data = {
-                "exported_at": datetime.now().isoformat(),
-                "server_info": SERVER_INFO,
-            }
-
-            if database:
-                db_query = f"SHOW DATABASES LIKE '{validate_like_pattern(database, 'database')}'"
-            else:
-                db_query = "SHOW DATABASES"
-
-            db_result = await _execute(
-                db_query, "Export schema - databases", row_limit=MAX_QUERY_LIMIT
+            schema_data, export_error = await _export_schema_metadata(
+                database, include_data_samples
             )
-            if not db_result["success"]:
-                return _text(f"Error getting database info: {db_result['error']}")
-
-            schema_data["databases"] = db_result["data"]
+            if export_error:
+                return _text(export_error)
+            if schema_data is None:
+                return _text("Error exporting schema metadata.")
 
             if format_type == "yaml":
-                output = yaml.dump(schema_data, default_flow_style=False)
+                output = yaml.safe_dump(schema_data, sort_keys=False, default_flow_style=False)
             elif format_type == "sql":
                 output = f"-- Schema export generated at {schema_data['exported_at']}\n"
                 output += f"-- Server: {SERVER_INFO['name']} v{SERVER_INFO['version']}\n\n"
                 for db in schema_data["databases"]:
                     output += f"-- Database: {db.get('name', 'Unknown')}\n"
+                    for schema in db.get("schemas", []):
+                        output += f"--   Schema: {schema.get('name', 'Unknown')}\n"
+                        for table in schema.get("tables", []):
+                            output += f"--     Table: {table.get('name', 'Unknown')}\n"
+                        for view_row in schema.get("views", []):
+                            output += f"--     View: {view_row.get('name', 'Unknown')}\n"
             else:  # json
                 output = json.dumps(schema_data, indent=2, default=str)
 

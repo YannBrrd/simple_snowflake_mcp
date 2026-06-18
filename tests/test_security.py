@@ -168,6 +168,24 @@ def test_config_path_traversal_is_blocked(monkeypatch):
     assert resolved.name == "config.yaml"
 
 
+def test_log_path_traversal_is_blocked():
+    resolved = server._resolve_log_file_path("../../../../etc/passwd")
+    expected = (server.REPO_ROOT / "logs" / "server.log").resolve()
+    assert resolved == expected
+    assert resolved.is_relative_to((server.REPO_ROOT / "logs").resolve())
+
+
+def test_log_path_escape_via_absolute_path_is_blocked():
+    resolved = server._resolve_log_file_path("/tmp/outside.log")
+    expected = (server.REPO_ROOT / "logs" / "server.log").resolve()
+    assert resolved == expected
+
+
+def test_log_path_inside_logs_is_allowed():
+    resolved = server._resolve_log_file_path("logs/custom/server.log")
+    assert resolved == (server.REPO_ROOT / "logs" / "custom" / "server.log").resolve()
+
+
 def test_validate_config_coerces_types():
     cfg = server._validate_config({"snowflake": {"read_only": "false", "max_query_limit": "abc"}})
     # A string "false" must become a real bool, not stay truthy.
