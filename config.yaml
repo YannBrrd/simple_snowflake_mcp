@@ -30,12 +30,32 @@ server:
 
 # Snowflake Configuration (these can still be overridden by environment variables)
 snowflake:
-  # Read-only mode by default
+  # Read-only mode by default. This is the SERVER-SIDE policy and is never
+  # client-controllable. The MCP_READ_ONLY environment variable overrides it.
+  # NOTE: keyword filtering is defense-in-depth only — enforce read-only with a
+  # least-privilege, SELECT-only Snowflake role for a real security boundary.
   read_only: true
   # Default query limit for safety
   default_query_limit: 1000
   # Maximum query limit
   max_query_limit: 50000
+  # Server-side statement timeout, applied as a Snowflake session parameter.
+  statement_timeout_seconds: 300
+  # Reuse a single Snowflake connection across queries instead of opening a new
+  # authenticated connection per query (mitigates connection-exhaustion DoS).
+  connection_reuse: true
+
+# Security controls
+security:
+  # In-process sliding-window rate limit applied across all tool calls.
+  rate_limit:
+    enabled: true
+    max_calls: 60
+    window_seconds: 60
+  # Bounds on the in-memory notes store.
+  notes:
+    max_count: 100
+    max_content_length: 10000
 
 # MCP Protocol Settings
 mcp:

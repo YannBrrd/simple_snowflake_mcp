@@ -5,8 +5,10 @@ version: '3.8'
 
 services:
   simple-snowflake-mcp:
-    # Use the more secure Dockerfile
-    dockerfile: Dockerfile.secure
+    # Use the more secure Dockerfile (dockerfile must be nested under build).
+    build:
+      context: .
+      dockerfile: Dockerfile.secure
     # Remove development volumes
     volumes:
       - ./logs:/app/logs:rw
