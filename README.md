@@ -6,28 +6,55 @@ A production-ready MCP server that provides seamless Snowflake integration with 
 
 ### Tools
 
-The server exposes comprehensive MCP tools to interact with Snowflake:
+The server exposes the following MCP tools to interact with Snowflake:
 
-**Core Database Operations:**
-- **execute-snowflake-sql**: Executes a SQL query on Snowflake and returns the result (list of dictionaries)
-- **execute-query**: Executes a SQL query in read-only mode (SELECT, SHOW, DESCRIBE, EXPLAIN, WITH) or not (if `read_only` is false), result in markdown format
-- **query-view**: Queries a view with an optional row limit (markdown result)
+**Database Operations:**
+- **execute-snowflake-sql**: Executes a SQL query on Snowflake and returns the result. Supports `json` (default), `markdown`, and `csv` output via the `format` argument.
+- **execute-query**: Executes a SQL query with server-enforced read-only protection. In read-only mode (the default) only `SELECT`, `SHOW`, `DESCRIBE`, `EXPLAIN`, and `WITH` statements (without DML) are allowed. Read-only mode is governed **solely by server configuration** and cannot be relaxed by the caller. Supports a `limit` and `markdown` (default)/`json`/`csv` output via `format`.
 
 **Discovery and Metadata:**
-- **list-snowflake-warehouses**: Lists available Data Warehouses (DWH) on Snowflake
-- **list-databases**: Lists all accessible Snowflake databases
-- **list-schemas**: Lists all schemas in a specified database
-- **list-tables**: Lists all tables in a database and schema
-- **list-views**: Lists all views in a database and schema
-- **describe-table**: Gives details of a table (columns, types, constraints)
-- **describe-view**: Gives details of a view (columns, SQL)
+- **get-connection-info**: Returns current Snowflake connection information and server status.
+- **list-snowflake-warehouses**: Lists available Data Warehouses (DWH) on Snowflake. Pass `include_details: false` for names only.
+- **list-databases**: Lists all accessible Snowflake databases. Supports a `pattern` filter (wildcards) and `include_details`.
+- **export-schema**: Exports database schema information. Supports `json` (default), `yaml`, and `sql` via `format`, an optional `database` filter, and `include_data_samples`.
 
-**Advanced Operations:**
-- **get-table-sample**: Gets sample data from a table
-- **explain-query**: Explains the execution plan of a SQL query
-- **show-query-history**: Shows recent query history
-- **get-warehouse-status**: Gets current warehouse status and usage
-- **validate-sql**: Validates SQL syntax without execution
+**Notes (in-memory session state):**
+- **add-note**: Adds or updates a note (`name`, `content`) kept in server memory for the session.
+- **delete-note**: Deletes an existing note by `name`.
+
+## 🔒 Security Model
+
+This server executes client-supplied SQL against Snowflake using a single set of
+credentials. Treat the MCP client as untrusted (an LLM can be prompt-injected) and
+deploy accordingly.
+
+> **The real security boundary is a least-privilege Snowflake role, not the
+> server's keyword filter.** The built-in read-only check is *defense-in-depth
+> only*. Always connect with a role scoped to exactly what you need.
+
+**Required deployment posture:**
+
+1. **Use a least-privilege, read-only Snowflake role.** For read-only deployments,
+   grant only `USAGE`/`SELECT` (and the relevant `SHOW`/`DESCRIBE` visibility) — no
+   `INSERT`/`UPDATE`/`DELETE`/DDL/`GRANT`. If the role cannot write, no bypass of the
+   keyword filter can cause damage.
+2. **Keep `read_only: true`** (the default). Read-only mode is governed solely by
+   server configuration / the `MCP_READ_ONLY` environment variable. It is **not**
+   client-controllable — there is no `read_only` tool argument.
+3. **Set a statement timeout and rate limit** (see `config.yaml`) to bound runaway
+   or abusive queries and warehouse-credit consumption.
+
+**What the server enforces:**
+
+- Read-only mode applies to **every** SQL-executing tool through a single guard;
+  comments are stripped, multi-statement input and CTE-fronted DML (e.g.
+  `WITH ... DELETE`) are rejected.
+- `pattern` / `database` arguments are validated against a strict allow-list before
+  being placed into `LIKE` clauses; `limit` is coerced to a bounded integer and
+  applied at the driver, never concatenated into SQL.
+- Snowflake errors are **not** returned verbatim to the client; a generic message
+  with a reference id is returned and full detail is logged server-side.
+- Query text is not logged at `INFO` (only a length + hash); full SQL is `DEBUG`-only.
 
 ## 🆕 Configuration System (v0.2.0)
 
@@ -50,14 +77,29 @@ server:
   name: "simple_snowflake_mcp"
   version: "0.2.0"
   description: "Enhanced Snowflake MCP Server with full protocol compliance"
-  connection_timeout: 30
-  read_only: true  # Set to false to allow write operations
+  connection:
+    test_on_startup: true
+    timeout: 30
 
 # Snowflake Configuration
 snowflake:
+  # Read-only mode is read from here (and the MCP_READ_ONLY env var), NOT from
+  # the server block. Set to false to allow write operations.
   read_only: true
   default_query_limit: 1000
   max_query_limit: 50000
+  statement_timeout_seconds: 300
+  connection_reuse: true
+
+# Security controls
+security:
+  rate_limit:
+    enabled: true
+    max_calls: 60
+    window_seconds: 60
+  notes:
+    max_count: 100
+    max_content_length: 10000
 
 # MCP Protocol Settings
 mcp:
@@ -390,7 +432,7 @@ The result will be returned in the MCP response.
    - Ouvrir la palette de commandes (Ctrl+Shift+P), taper `MCP: Start Server` et sélectionner `simple-snowflake-mcp`.
 
 5. **Utilisation**
-   - Les outils MCP exposés vous permettent d'interroger Snowflake (list-databases, list-views, describe-view, query-view, execute-query, etc.).
+   - Les outils MCP exposés vous permettent d'interroger Snowflake (list-databases, list-snowflake-warehouses, execute-query, execute-snowflake-sql, export-schema, etc.).
    - Pour plus d'exemples, voir la documentation du protocole MCP : https://github.com/modelcontextprotocol/create-python-server
 
 ## Enhanced MCP Features (v0.2.0)
@@ -431,31 +473,22 @@ The server advertises these MCP capabilities:
 
 ## Supported MCP Functions
 
-The server exposes comprehensive MCP tools to interact with Snowflake:
+The server exposes the following MCP tools (see the [Tools](#tools) section above for full argument details):
 
-**Core Database Operations:**
-- **execute-snowflake-sql**: Executes a SQL query and returns structured results
-- **execute-query**: Advanced query execution with multiple output formats
-- **query-view**: Optimized view querying with result limiting
-- **validate-sql**: SQL syntax validation without execution
+**Database Operations:**
+- **execute-snowflake-sql**: Executes a SQL query and returns results as JSON, markdown, or CSV
+- **execute-query**: Query execution with read-only protection, row limit, and multiple output formats
 
 **Discovery and Metadata:**
+- **get-connection-info**: Current connection information and server status
 - **list-snowflake-warehouses**: Lists available Data Warehouses with status
-- **list-databases**: Lists all accessible databases with metadata  
-- **list-schemas**: Lists all schemas in a specified database
-- **list-tables**: Lists all tables with column information
-- **list-views**: Lists all views with definitions
-- **describe-table**: Detailed table schema and constraints
-- **describe-view**: View definition and column details
+- **list-databases**: Lists all accessible databases, with optional pattern filtering
+- **export-schema**: Exports database schema in JSON, YAML, or SQL format
 
-**Advanced Analytics:**
-- **get-table-sample**: Sample data extraction with configurable limits
-- **explain-query**: Query execution plan analysis
-- **show-query-history**: Recent query history with performance metrics
-- **get-warehouse-status**: Real-time warehouse status and usage
-- **get-account-usage**: Account-level usage statistics
+**Session Notes:**
+- **add-note** / **delete-note**: Manage in-memory notes for the session
 
-For detailed usage examples and parameter schemas, see the MCP protocol documentation.
+The server also implements MCP **resources** (Snowflake objects with subscription support) and **prompts**. For parameter schemas, inspect `handle_list_tools` in `src/simple_snowflake_mcp/server.py`.
 
 ## 🚀 Getting Started Examples
 
@@ -482,15 +515,26 @@ For detailed usage examples and parameter schemas, see the MCP protocol document
 # config_production.yaml
 logging:
   level: WARNING
-  file_logging: true
-  log_file: "/var/log/mcp_server.log"
+  file_logging:
+    enabled: true
+    filename: "/var/log/mcp_server.log"
 
-server:
-  read_only: false  # Allow write operations
-  
 snowflake:
+  # Keep true unless the connecting Snowflake role is itself read-only.
+  read_only: true
   default_query_limit: 5000
   max_query_limit: 100000
+  statement_timeout_seconds: 120
+  connection_reuse: true
+
+security:
+  rate_limit:
+    enabled: true
+    max_calls: 60
+    window_seconds: 60
+  notes:
+    max_count: 100
+    max_content_length: 10000
 
 mcp:
   experimental_features:

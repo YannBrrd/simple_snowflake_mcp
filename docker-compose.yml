@@ -47,7 +47,9 @@ services:
     env_file:
       - .env
     volumes:
-      - ./src:/app/src
+      # Source is mounted read-only: live code is visible but the container
+      # cannot tamper with it, and the dev profile must never run in production.
+      - ./src:/app/src:ro
       - ./logs:/app/logs
     profiles:
       - dev
