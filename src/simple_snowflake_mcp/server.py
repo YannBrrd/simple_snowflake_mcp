@@ -20,7 +20,7 @@ from mcp.server import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 from pydantic import AnyUrl
 
-# Charger les variables d'environnement depuis le fichier .env
+# Load environment variables from the .env file
 load_dotenv()
 
 # Repository root, used to constrain where configuration files may be loaded from.
@@ -148,25 +148,51 @@ def _validate_config(config: dict[str, Any]) -> dict[str, Any]:
     by supplying, e.g., read_only as the string "false" or an absurd query limit,
     nor crash the server by replacing a config subtree with a non-mapping value.
     """
+    # Fallbacks reference DEFAULT_CONFIG so the baseline lives in exactly one
+    # place and the two cannot drift.
+    d_sf = DEFAULT_CONFIG["snowflake"]
     sf = _ensure_dict(config, "snowflake")
-    sf["read_only"] = _as_bool(sf.get("read_only", True), default=True)
-    sf["max_query_limit"] = _as_int(sf.get("max_query_limit", 50000), 50000, 1, 10_000_000)
+    sf["read_only"] = _as_bool(sf.get("read_only", d_sf["read_only"]), default=True)
+    sf["max_query_limit"] = _as_int(
+        sf.get("max_query_limit", d_sf["max_query_limit"]), d_sf["max_query_limit"], 1, 10_000_000
+    )
     sf["default_query_limit"] = _as_int(
-        sf.get("default_query_limit", 1000), 1000, 1, sf["max_query_limit"]
+        sf.get("default_query_limit", d_sf["default_query_limit"]),
+        d_sf["default_query_limit"],
+        1,
+        sf["max_query_limit"],
     )
     sf["statement_timeout_seconds"] = _as_int(
-        sf.get("statement_timeout_seconds", 300), 300, 1, 86_400
+        sf.get("statement_timeout_seconds", d_sf["statement_timeout_seconds"]),
+        d_sf["statement_timeout_seconds"],
+        1,
+        86_400,
     )
-    sf["connection_reuse"] = _as_bool(sf.get("connection_reuse", True), default=True)
+    sf["connection_reuse"] = _as_bool(
+        sf.get("connection_reuse", d_sf["connection_reuse"]), default=True
+    )
 
+    d_rl = DEFAULT_CONFIG["security"]["rate_limit"]
+    d_nt = DEFAULT_CONFIG["security"]["notes"]
     sec = _ensure_dict(config, "security")
     rl = _ensure_dict(sec, "rate_limit")
-    rl["enabled"] = _as_bool(rl.get("enabled", True), default=True)
-    rl["max_calls"] = _as_int(rl.get("max_calls", 60), 60, 1, 1_000_000)
-    rl["window_seconds"] = _as_int(rl.get("window_seconds", 60), 60, 1, 86_400)
+    rl["enabled"] = _as_bool(rl.get("enabled", d_rl["enabled"]), default=True)
+    rl["max_calls"] = _as_int(
+        rl.get("max_calls", d_rl["max_calls"]), d_rl["max_calls"], 1, 1_000_000
+    )
+    rl["window_seconds"] = _as_int(
+        rl.get("window_seconds", d_rl["window_seconds"]), d_rl["window_seconds"], 1, 86_400
+    )
     nt = _ensure_dict(sec, "notes")
-    nt["max_count"] = _as_int(nt.get("max_count", 100), 100, 0, 1_000_000)
-    nt["max_content_length"] = _as_int(nt.get("max_content_length", 10000), 10000, 0, 10_000_000)
+    nt["max_count"] = _as_int(
+        nt.get("max_count", d_nt["max_count"]), d_nt["max_count"], 0, 1_000_000
+    )
+    nt["max_content_length"] = _as_int(
+        nt.get("max_content_length", d_nt["max_content_length"]),
+        d_nt["max_content_length"],
+        0,
+        10_000_000,
+    )
 
     # server.connection is read at import (CONNECTION_TIMEOUT) and at startup
     # (test_on_startup); normalize it so a malformed override can't crash import.
@@ -174,9 +200,12 @@ def _validate_config(config: dict[str, Any]) -> dict[str, Any]:
     srv.setdefault("name", DEFAULT_CONFIG["server"]["name"])
     srv.setdefault("version", DEFAULT_CONFIG["server"]["version"])
     srv.setdefault("description", DEFAULT_CONFIG["server"]["description"])
+    d_conn = DEFAULT_CONFIG["server"]["connection"]
     conn = _ensure_dict(srv, "connection")
-    conn["timeout"] = _as_int(conn.get("timeout", 30), 30, 1, 86_400)
-    conn["test_on_startup"] = _as_bool(conn.get("test_on_startup", True), default=True)
+    conn["timeout"] = _as_int(conn.get("timeout", d_conn["timeout"]), d_conn["timeout"], 1, 86_400)
+    conn["test_on_startup"] = _as_bool(
+        conn.get("test_on_startup", d_conn["test_on_startup"]), default=True
+    )
     return config
 
 
@@ -212,8 +241,9 @@ def setup_logging():
     """Setup logging based on configuration."""
     log_config = CONFIG.get("logging", {})
 
-    # Convert string log level to logging constant
-    log_level_str = log_config.get("level", "INFO").upper()
+    # Convert string log level to logging constant. The LOG_LEVEL environment
+    # variable overrides the config file (documented in README).
+    log_level_str = os.getenv("LOG_LEVEL", log_config.get("level", "INFO")).upper()
     log_level = getattr(logging, log_level_str, logging.INFO)
 
     # Setup basic configuration
@@ -411,6 +441,12 @@ def _strip_sql_noise(sql: str) -> str:
         elif ch in "'\"":  # quoted string ('') or identifier ("")
             i += 1
             while i < n:
+                # Snowflake honors backslash escapes inside string literals
+                # (e.g. 'O\'Brien'), so a backslash skips the next char. Quoted
+                # identifiers ("...") use only doubled-quote escaping.
+                if ch == "'" and sql[i] == "\\" and i + 1 < n:
+                    i += 2
+                    continue
                 if sql[i] == ch:
                     if i + 1 < n and sql[i + 1] == ch:  # doubled-quote escape
                         i += 2
@@ -510,16 +546,27 @@ def _get_connection():
     return _connection
 
 
-def _run_sql_once(query: str, row_limit: int | None) -> Any:
-    """Execute the query on the (possibly cached) connection and return its data."""
+def _run_sql_once(query: str, row_limit: int | None) -> tuple[Any, bool]:
+    """Execute the query on the (possibly cached) connection.
+
+    Returns ``(data, truncated)``. When ``row_limit`` is set we fetch one extra
+    row so we can tell the caller whether the result was capped, then trim back
+    to ``row_limit`` — the truncation is reported rather than hidden (SEC-H2).
+    """
     conn = _get_connection()
     with conn.cursor() as cur:
         cur.execute(query)
         if cur.description:
             columns = [desc[0] for desc in cur.description]
-            rows = cur.fetchmany(row_limit) if row_limit else cur.fetchall()
-            return [dict(zip(columns, row)) for row in rows]
-        return {"status": "success", "rowcount": cur.rowcount}
+            if row_limit:
+                rows = list(cur.fetchmany(row_limit + 1))
+                truncated = len(rows) > row_limit
+                rows = rows[:row_limit]
+            else:
+                rows = cur.fetchall()
+                truncated = False
+            return [dict(zip(columns, row)) for row in rows], truncated
+        return {"status": "success", "rowcount": cur.rowcount}, False
 
 
 def _reset_connection() -> None:
@@ -577,6 +624,12 @@ def _safe_snowflake_execute(
             "data": None,
         }
 
+    # Enforce the default row cap here, at the single chokepoint, so it applies
+    # to every user-SQL tool and cannot be skipped by a caller that forgets to
+    # request it (SEC-H2). An explicit row_limit (client limit) takes precedence.
+    if is_user_sql and row_limit is None:
+        row_limit = _default_row_cap(query)
+
     # Do not log raw SQL (may contain PII/secrets) at INFO; emit a hash instead
     # and reserve the full text for DEBUG (SEC-M2, CQ-M4).
     logger.info("Executing %s (%d chars, hash=%s)", description, len(query), _sql_hash(query))
@@ -591,19 +644,19 @@ def _safe_snowflake_execute(
             # see a spurious error on the first query after an idle period.
             reusing = _connection is not None
             try:
-                result: Any = _run_sql_once(query, row_limit)
+                result, truncated = _run_sql_once(query, row_limit)
             except _CONNECTION_ERRORS:
                 _reset_connection()
                 if not reusing:
                     raise
                 logger.info("Snowflake connection appears stale; reconnecting and retrying once")
-                result = _run_sql_once(query, row_limit)
+                result, truncated = _run_sql_once(query, row_limit)
             finally:
                 if not CONNECTION_REUSE:
                     _reset_connection()
 
         logger.info("%s completed successfully", description)
-        return {"success": True, "data": result}
+        return {"success": True, "data": result, "truncated": truncated, "row_limit": row_limit}
 
     except SnowflakeConfigError as e:
         # Safe to surface: contains only which env vars are missing, no secrets.
@@ -616,6 +669,31 @@ def _safe_snowflake_execute(
             "error": f"An internal error occurred while executing the query (ref {ref}).",
             "data": None,
         }
+
+
+async def _execute(
+    query: str,
+    description: str = "Query",
+    *,
+    is_user_sql: bool = False,
+    row_limit: int | None = None,
+) -> dict[str, Any]:
+    """
+    Await the synchronous chokepoint on a worker thread.
+
+    Snowflake I/O (connect/execute/fetch) is blocking and can run for up to the
+    statement timeout; running it inline would freeze the asyncio event loop (and
+    the rate limiter). Offloading to a thread keeps the server responsive while
+    the per-connection ``_connection_lock`` still serializes access to the single
+    shared connection.
+    """
+    return await asyncio.to_thread(
+        _safe_snowflake_execute,
+        query,
+        description,
+        is_user_sql=is_user_sql,
+        row_limit=row_limit,
+    )
 
 
 def _format_markdown_table(data: list[dict[str, Any]]) -> str:
@@ -732,7 +810,9 @@ async def handle_read_resource(uri: AnyUrl) -> str:
     elif uri.scheme == "snowflake":
         if str(uri) == "snowflake://schema/metadata":
             # Return comprehensive schema metadata
-            result = _safe_snowflake_execute("SHOW DATABASES", "Schema metadata query")
+            result = await _execute(
+                "SHOW DATABASES", "Schema metadata query", row_limit=MAX_QUERY_LIMIT
+            )
             if result["success"]:
                 return json.dumps(
                     {
@@ -748,7 +828,7 @@ async def handle_read_resource(uri: AnyUrl) -> str:
 
         elif str(uri) == "snowflake://status/connection":
             # Return connection status
-            result = _safe_snowflake_execute(
+            result = await _execute(
                 "SELECT CURRENT_VERSION(), CURRENT_TIMESTAMP()", "Connection status"
             )
             if result["success"]:
@@ -911,7 +991,7 @@ async def handle_get_prompt(name: str, arguments: dict[str, str] | None) -> type
         focus = args.get("focus", "all")
 
         # Get schema information
-        result = _safe_snowflake_execute("SHOW DATABASES", "Schema analysis")
+        result = await _execute("SHOW DATABASES", "Schema analysis", row_limit=MAX_QUERY_LIMIT)
         schema_info = result["data"] if result["success"] else [{"error": result["error"]}]
 
         prompt_text = f"""Analyze the following Snowflake database schema information:
@@ -944,7 +1024,9 @@ Please provide insights about:
         complexity = args.get("complexity", "simple")
 
         # Get current schema context
-        result = _safe_snowflake_execute("SHOW DATABASES", "Query generation context")
+        result = await _execute(
+            "SHOW DATABASES", "Query generation context", row_limit=MAX_QUERY_LIMIT
+        )
         schema_context = result["data"] if result["success"] else []
 
         prompt_text = f"""Generate SQL queries for Snowflake based on the following requirements:
@@ -978,7 +1060,7 @@ Ensure queries are compatible with Snowflake SQL dialect.
         error_msg = args.get("error_message", "general connection issues")
 
         # Get connection status
-        status_result = _safe_snowflake_execute("SELECT CURRENT_VERSION()", "Connection test")
+        status_result = await _execute("SELECT CURRENT_VERSION()", "Connection test")
         connection_status = (
             "Connected successfully"
             if status_result["success"]
@@ -1200,27 +1282,34 @@ def _render_output(data: Any, format_type: str) -> str:
     return json.dumps(data, indent=2, default=str)
 
 
-def _coerce_limit(raw_limit: Any, sql: str) -> int | None:
+def _coerce_limit(raw_limit: Any) -> int | None:
     """
-    Resolve the row limit, server-side, as a bounded integer (SEC-H2).
+    Coerce an explicit client-supplied row limit to a bounded integer (SEC-H2).
 
     Never trusts the schema-declared type: a non-conforming client could send a
-    string or an out-of-range value. The limit is applied at the driver via
-    fetchmany, so it is never concatenated into SQL text.
+    string or an out-of-range value. Returns None when no explicit limit is
+    given, in which case the chokepoint applies the default cap. The limit is
+    applied at the driver via fetchmany, never concatenated into SQL text.
     """
-    if raw_limit is not None:
-        # bool is a subclass of int; reject it so limit:true doesn't become 1.
-        if isinstance(raw_limit, bool):
-            raise ValueError("'limit' must be an integer")
-        try:
-            limit = int(raw_limit)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("'limit' must be an integer") from exc
-        return max(1, min(limit, MAX_QUERY_LIMIT))
-    # Apply a default row cap to row-producing reads (SELECT and WITH ... SELECT)
-    # that do not already constrain themselves with a LIMIT. Use a tokenized check
-    # so an identifier containing the substring "LIMIT" (e.g. delimiter_col) does
-    # not suppress the cap, and so CTE-fronted reads are also bounded.
+    if raw_limit is None:
+        return None
+    # bool is a subclass of int; reject it so limit:true doesn't become 1.
+    if isinstance(raw_limit, bool):
+        raise ValueError("'limit' must be an integer")
+    try:
+        limit = int(raw_limit)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("'limit' must be an integer") from exc
+    return max(1, min(limit, MAX_QUERY_LIMIT))
+
+
+def _default_row_cap(sql: str) -> int | None:
+    """
+    Default row cap for row-producing reads (SELECT and WITH ... SELECT) that do
+    not already constrain themselves with a LIMIT. Uses a tokenized check so an
+    identifier containing the substring "LIMIT" (e.g. delimiter_col) does not
+    suppress the cap, and so CTE-fronted reads are also bounded.
+    """
     cleaned = _strip_sql_noise(sql)
     first_match = _WORD_RE.match(cleaned)
     first_word = first_match.group(0).upper() if first_match else ""
@@ -1229,16 +1318,34 @@ def _coerce_limit(raw_limit: Any, sql: str) -> int | None:
     return None
 
 
-def _run_user_query(sql: str, format_type: str, description: str, row_limit: int | None):
+async def _run_user_query(
+    sql: str, format_type: str, description: str, row_limit: int | None
+) -> list[types.TextContent]:
     """
     Shared execution path for the user-facing SQL tools (CQ-M1). Read-only
     enforcement and row limiting happen inside _safe_snowflake_execute, the single
     SQL chokepoint, so neither tool can bypass them.
     """
-    result = _safe_snowflake_execute(sql, description, is_user_sql=True, row_limit=row_limit)
-    if result["success"]:
-        return _text(_render_output(result["data"], format_type))
-    return _text(f"Snowflake error: {result['error']}")
+    result = await _execute(sql, description, is_user_sql=True, row_limit=row_limit)
+    if not result["success"]:
+        return _text(f"Snowflake error: {result['error']}")
+
+    contents = _text(_render_output(result["data"], format_type))
+    if result.get("truncated"):
+        # Never silently drop rows: tell the caller the result was capped and how
+        # to retrieve more. Emitted as a separate content block so it does not
+        # corrupt JSON/CSV output.
+        contents.append(
+            types.TextContent(
+                type="text",
+                text=(
+                    f"Note: results were truncated to {result['row_limit']} rows. "
+                    f"Pass a higher `limit` (up to {MAX_QUERY_LIMIT}) or add an explicit "
+                    "LIMIT clause to retrieve more."
+                ),
+            )
+        )
+    return contents
 
 
 @server.call_tool()
@@ -1263,7 +1370,7 @@ async def handle_call_tool(
     try:
         # Connection and metadata tools
         if name == "get-connection-info":
-            result = _safe_snowflake_execute(
+            result = await _execute(
                 "SELECT CURRENT_VERSION(), CURRENT_USER(), CURRENT_DATABASE(), "
                 "CURRENT_SCHEMA(), CURRENT_WAREHOUSE()",
                 "Connection info",
@@ -1318,10 +1425,9 @@ async def handle_call_tool(
             if not sql:
                 raise ValueError("'sql' parameter is required")
             format_type = args.get("format", "json")
-            # Apply the same default row cap as execute-query so this tool can't
-            # be used to bypass it with an unbounded fetch.
-            row_limit = _coerce_limit(None, sql)
-            return _run_user_query(sql, format_type, "SQL execution", row_limit)
+            # No explicit limit; the chokepoint applies the default row cap so
+            # this tool can't be used for an unbounded fetch.
+            return await _run_user_query(sql, format_type, "SQL execution", None)
 
         elif name == "execute-query":
             sql = args.get("sql")
@@ -1330,12 +1436,12 @@ async def handle_call_tool(
             # NOTE: read-only is governed solely by server config; there is
             # deliberately no client-supplied read_only argument (SEC-C2, SEC-M1).
             format_type = args.get("format", "markdown")
-            row_limit = _coerce_limit(args.get("limit"), sql)
-            return _run_user_query(sql, format_type, "Execute query", row_limit)
+            row_limit = _coerce_limit(args.get("limit"))
+            return await _run_user_query(sql, format_type, "Execute query", row_limit)
 
         elif name == "list-snowflake-warehouses":
             include_details = args.get("include_details", True)
-            result = _safe_snowflake_execute("SHOW WAREHOUSES", "List warehouses")
+            result = await _execute("SHOW WAREHOUSES", "List warehouses", row_limit=MAX_QUERY_LIMIT)
             if result["success"]:
                 if include_details:
                     output = json.dumps(result["data"], indent=2, default=str)
@@ -1353,7 +1459,7 @@ async def handle_call_tool(
                 # Validate before interpolation: SHOW ... LIKE takes no binds (SEC-H1).
                 query += f" LIKE '{validate_like_pattern(pattern, 'pattern')}'"
 
-            result = _safe_snowflake_execute(query, "List databases")
+            result = await _execute(query, "List databases", row_limit=MAX_QUERY_LIMIT)
             if result["success"]:
                 if include_details:
                     output = json.dumps(result["data"], indent=2, default=str)
@@ -1376,7 +1482,9 @@ async def handle_call_tool(
             else:
                 db_query = "SHOW DATABASES"
 
-            db_result = _safe_snowflake_execute(db_query, "Export schema - databases")
+            db_result = await _execute(
+                db_query, "Export schema - databases", row_limit=MAX_QUERY_LIMIT
+            )
             if not db_result["success"]:
                 return _text(f"Error getting database info: {db_result['error']}")
 
@@ -1408,7 +1516,7 @@ async def handle_call_tool(
 
 async def test_snowflake_connection():
     """Test Snowflake connection for debugging purposes."""
-    result = _safe_snowflake_execute("SELECT CURRENT_TIMESTAMP()", "Connection test")
+    result = await _execute("SELECT CURRENT_TIMESTAMP()", "Connection test")
     if result["success"]:
         timestamp = result["data"][0] if result["data"] else "No data"
         logger.info("Snowflake connection OK, CURRENT_TIMESTAMP: %s", timestamp)

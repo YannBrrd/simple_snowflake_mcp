@@ -22,6 +22,8 @@ WORKDIR /app
 # Copy the resolved virtual environment and source from the builder.
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/src /app/src
+# Copy the default configuration (otherwise the server falls back to DEFAULT_CONFIG).
+COPY config.yaml /app/config.yaml
 
 # Create a non-root user with a fixed UID/GID and own the app directory.
 RUN groupadd -r -g 1001 mcp && \

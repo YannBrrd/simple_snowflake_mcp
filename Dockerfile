@@ -1,40 +1,42 @@
-# Multi-stage build optimisé avec uv
+# Optimized multi-stage build using uv
 FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim AS builder
 
 WORKDIR /app
 
-# Copier les fichiers de dépendances
+# Copy the dependency files
 COPY pyproject.toml uv.lock ./
 
-# Installer les dépendances avec uv (beaucoup plus rapide)
+# Install dependencies with uv (much faster)
 RUN uv sync --frozen --no-dev --no-install-project
 
-# Copier le code source
+# Copy the source code
 COPY src/ ./src/
 
-# Installer le projet
+# Install the project
 RUN uv sync --frozen --no-dev
 
-# Stage de production
+# Production stage
 FROM python:3.11-slim-bookworm AS production
 
 WORKDIR /app
 
-# Copier l'environnement virtuel depuis le builder
+# Copy the virtual environment from the builder
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/src /app/src
+# Copy the default configuration (otherwise the server falls back to DEFAULT_CONFIG)
+COPY config.yaml /app/config.yaml
 
-# Créer un utilisateur non-root
+# Create a non-root user
 RUN groupadd -r -g 1001 mcp && \
     useradd -r -g mcp -u 1001 -m -s /bin/bash mcp && \
     chown -R mcp:mcp /app
 
 USER mcp
 
-# Ajouter le venv au PATH
+# Add the venv to PATH
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
-# Commande par défaut
+# Default command
 CMD ["simple-snowflake-mcp"]

@@ -51,7 +51,7 @@ The code implements 8 tools in `handle_list_tools`/`handle_call_tool`: `get-conn
 
 ## Conventions
 
-- Comments and some log messages are in French; UI/tool text is mixed French/English. Match the surrounding language.
+- Code comments, log messages, docs (README), and UI/tool text are all in English. Keep new contributions in English.
 - Ruff: line length 100, target py310, rules `E,F,I,N,W,UP`. CI (`.github/workflows/ci.yml`) runs `ruff check`, `ruff format --check`, and `pytest` on push/PR — keep all three green.
 - Errors are returned to the client as `TextContent` strings via the `_text(...)` helper, not raised — preserve this so the MCP client gets a readable message rather than a transport failure.
 - Tests mock `snowflake.connector.connect`; they never hit a live account. Patch `server.READ_ONLY`/`server._RATE_LIMIT_ENABLED` and reset `server._connection` in fixtures (see `tests/`).

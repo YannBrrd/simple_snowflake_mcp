@@ -52,6 +52,11 @@ deploy accordingly.
 - `pattern` / `database` arguments are validated against a strict allow-list before
   being placed into `LIKE` clauses; `limit` is coerced to a bounded integer and
   applied at the driver, never concatenated into SQL.
+- Row-producing reads without an explicit `LIMIT` are capped at
+  `default_query_limit` rows (applied at the driver). When a result is capped the
+  response includes an explicit *"results were truncated"* notice — rows are never
+  dropped silently. Pass a larger `limit` (up to `max_query_limit`) or add your own
+  `LIMIT` clause to retrieve more.
 - Snowflake errors are **not** returned verbatim to the client; a generic message
   with a reference id is returned and full detail is logged server-side.
 - Query text is not logged at `INFO` (only a length + hash); full SQL is `DEBUG`-only.
@@ -67,10 +72,13 @@ Create a `config.yaml` file in your project root:
 ```yaml
 # Logging Configuration
 logging:
-  level: INFO  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  level: INFO  # DEBUG, INFO, WARNING, ERROR, CRITICAL (overridable via LOG_LEVEL)
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-  file_logging: false  # Set to true to enable file logging
-  log_file: "mcp_server.log"  # Log file path (when file_logging is true)
+  file_logging:
+    enabled: false        # Set to true to enable file logging
+    filename: "logs/server.log"
+    max_bytes: 10485760   # Rotate after 10 MB
+    backup_count: 5
 
 # Server Configuration
 server:
@@ -110,10 +118,7 @@ mcp:
   notifications:
     resources_changed: true
     tools_changed: true
-  
-  limits:
-    max_prompt_length: 10000
-    max_resource_size: 1048576  # 1MB
+    prompts_changed: true
 ```
 
 ### Using Custom Configuration
@@ -139,39 +144,39 @@ Configuration values are resolved in this order (highest to lowest priority):
 3. Default `config.yaml` file
 4. Built-in defaults
 
-## 🚀 Installation Rapide
+## 🚀 Quick Install
 
-### Méthode 1 : Installation avec `uvx` (Recommandé)
+### Method 1: Install with `uvx` (Recommended)
 
 ```bash
-# Installation et exécution directe
+# Install and run directly
 uvx simple-snowflake-mcp
 ```
 
-### Méthode 2 : Installation depuis le code source
+### Method 2: Install from source
 
 ```bash
-# Cloner le repo
+# Clone the repo
 git clone https://github.com/YannBrrd/simple_snowflake_mcp
 cd simple_snowflake_mcp
 
-# Installer avec uv (crée automatiquement un venv)
+# Install with uv (creates a venv automatically)
 uv sync
 
-# Exécuter
+# Run
 uv run simple-snowflake-mcp
 ```
 
-### Méthode 3 : Développement
+### Method 3: Development
 
 ```bash
-# Installer avec les dépendances de développement
+# Install with development dependencies
 uv sync --all-extras
 
-# Lancer les tests
+# Run the tests
 uv run pytest
 
-# Linter avec ruff
+# Lint with ruff
 uv run ruff check .
 uv run ruff format .
 ```
@@ -329,35 +334,35 @@ docker-compose --profile dev up simple-snowflake-mcp-dev -d
 
 This allows you to make changes to the code without rebuilding the Docker image.
 
-## Développement
+## Development
 
-### Installation des dépendances
+### Installing dependencies
 
 ```bash
-# Synchroniser toutes les dépendances (prod + dev)
+# Sync all dependencies (prod + dev)
 uv sync --all-extras
 
-# Mettre à jour les dépendances
+# Update dependencies
 uv lock --upgrade
 
-# Ajouter une nouvelle dépendance
+# Add a new dependency
 uv add <package-name>
 
-# Ajouter une dépendance de dev
+# Add a dev dependency
 uv add --dev <package-name>
 ```
 
-### Build et Publication
+### Build and Publish
 
 ```bash
 # Build
 uv build
 
-# Publier sur PyPI
+# Publish to PyPI
 uv publish --token $UV_PUBLISH_TOKEN
 ```
 
-### Debugging avec MCP Inspector
+### Debugging with MCP Inspector
 
 Since MCP servers run over stdio, debugging can be challenging. For the best debugging
 experience, we strongly recommend using the [MCP Inspector](https://github.com/modelcontextprotocol/inspector).
@@ -388,36 +393,36 @@ Example:
 
 The result will be returned in the MCP response.
 
-## Installation et configuration dans VS Code
+## Installation and configuration in VS Code
 
-1. **Cloner le projet et installer les dépendances**
+1. **Clone the project and install dependencies**
    ```sh
    git clone https://github.com/YannBrrd/simple_snowflake_mcp
    cd simple_snowflake_mcp
-   
-   # Installer avec uv (crée automatiquement un venv)
+
+   # Install with uv (creates a venv automatically)
    uv sync --all-extras
    ```
 
-2. **Configurer l'accès Snowflake**
-   - Copier `.env.example` vers `.env` et remplir vos credentials :
+2. **Configure Snowflake access**
+   - Copy `.env.example` to `.env` and fill in your credentials:
      ```env
      SNOWFLAKE_USER=...
      SNOWFLAKE_PASSWORD=...
      SNOWFLAKE_ACCOUNT=...
-     # SNOWFLAKE_WAREHOUSE   Optionnel: Nom du warehouse Snowflake
-     # SNOWFLAKE_DATABASE    Optionnel: Nom de la base par défaut
-     # SNOWFLAKE_SCHEMA      Optionnel: Nom du schéma par défaut
-     # MCP_READ_ONLY=true|false   Optionnel: true/false pour forcer le mode lecture seule
+     # SNOWFLAKE_WAREHOUSE   Optional: Snowflake warehouse name
+     # SNOWFLAKE_DATABASE    Optional: default database name
+     # SNOWFLAKE_SCHEMA      Optional: default schema name
+     # MCP_READ_ONLY=true|false   Optional: true/false to force read-only mode
      ```
 
-3. **Configurer le serveur (v0.2.0)**
-   - Le serveur créera automatiquement un fichier `config.yaml` par défaut au premier lancement
-   - Personnalisez le logging, les limites et les fonctionnalités MCP en éditant `config.yaml`
-   - Utilisez `CONFIG_FILE=custom_config.yaml` pour spécifier un fichier de configuration différent
+3. **Configure the server (v0.2.0)**
+   - If no `config.yaml` is present, the server uses its built-in defaults (no file is created automatically)
+   - Customize logging, limits, and MCP features by editing `config.yaml` (an example is provided in the repository)
+   - Use `CONFIG_FILE=custom_config.yaml` to specify a different file (resolved **within the repository only**, to prevent path traversal)
 
-4. **Configurer VS Code pour le debugging MCP**
-   - Le fichier `.vscode/mcp.json` est déjà présent :
+4. **Configure VS Code for MCP debugging**
+   - The `.vscode/mcp.json` file is already present:
      ```json
      {
        "servers": {
@@ -429,11 +434,11 @@ The result will be returned in the MCP response.
        }
      }
      ```
-   - Ouvrir la palette de commandes (Ctrl+Shift+P), taper `MCP: Start Server` et sélectionner `simple-snowflake-mcp`.
+   - Open the command palette (Ctrl+Shift+P), type `MCP: Start Server`, and select `simple-snowflake-mcp`.
 
-5. **Utilisation**
-   - Les outils MCP exposés vous permettent d'interroger Snowflake (list-databases, list-snowflake-warehouses, execute-query, execute-snowflake-sql, export-schema, etc.).
-   - Pour plus d'exemples, voir la documentation du protocole MCP : https://github.com/modelcontextprotocol/create-python-server
+5. **Usage**
+   - The exposed MCP tools let you query Snowflake (list-databases, list-snowflake-warehouses, execute-query, execute-snowflake-sql, export-schema, etc.).
+   - For more examples, see the MCP protocol documentation: https://github.com/modelcontextprotocol/create-python-server
 
 ## Enhanced MCP Features (v0.2.0)
 
@@ -452,15 +457,14 @@ This server now implements comprehensive MCP protocol features:
 - Support for resource templates and prompts
 
 **⚡ Performance & Reliability**
-- Configurable query limits and timeouts
-- Comprehensive error handling with detailed error codes
-- Connection pooling and retry mechanisms
+- Configurable query limits and a server-side statement timeout
+- Comprehensive error handling with generic client messages and a server-side reference id
+- Single-connection reuse with automatic reconnect on a stale connection
 
 **🔧 Development Features**
 - Multiple output formats (JSON, Markdown, CSV)
-- SQL syntax validation without execution
-- Query execution plan analysis
-- Comprehensive logging with configurable levels
+- In-process rate limiting across all tool calls
+- Comprehensive logging with configurable levels (and an explicit truncation notice on capped results)
 
 ### MCP Capabilities Advertised
 
@@ -498,7 +502,7 @@ The server also implements MCP **resources** (Snowflake objects with subscriptio
 {
   "name": "execute-query",
   "arguments": {
-    "query": "SELECT CURRENT_TIMESTAMP;",
+    "sql": "SELECT CURRENT_TIMESTAMP;",
     "format": "markdown"
   }
 }
