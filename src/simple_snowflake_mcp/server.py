@@ -1492,6 +1492,154 @@ async def _export_schema_metadata(
     return schema_data, None
 
 
+async def _tool_get_connection_info(args: dict[str, Any]) -> list[types.TextContent]:
+    _ = args
+    result = await _execute(
+        "SELECT CURRENT_VERSION(), CURRENT_USER(), CURRENT_DATABASE(), "
+        "CURRENT_SCHEMA(), CURRENT_WAREHOUSE()",
+        "Connection info",
+    )
+    if result["success"]:
+        info = {
+            "server_info": SERVER_INFO,
+            "connection_status": "connected",
+            "snowflake_info": result["data"][0] if result["data"] else {},
+            "config": safe_config_echo(),
+            "read_only_mode": READ_ONLY,
+            "timestamp": datetime.now().isoformat(),
+        }
+        return _text(json.dumps(info, indent=2))
+    return _text(f"Connection error: {result['error']}")
+
+
+async def _tool_add_note(args: dict[str, Any]) -> list[types.TextContent]:
+    note_name = args.get("name")
+    content = args.get("content")
+    if not note_name or not content:
+        raise ValueError("Both 'name' and 'content' are required")
+    if len(content) > _NOTES_MAX_LENGTH:
+        raise ValueError(f"Note content exceeds maximum length of {_NOTES_MAX_LENGTH} characters")
+    # Bound the in-memory store (SEC-L2): allow updates to existing notes,
+    # but cap the number of distinct notes.
+    if note_name not in notes and len(notes) >= _NOTES_MAX_COUNT:
+        raise ValueError(
+            f"Note limit reached ({_NOTES_MAX_COUNT}); delete a note before adding more"
+        )
+
+    old_content = notes.get(note_name)
+    notes[note_name] = content
+    return _text(f"Note '{note_name}' {'updated' if old_content else 'created'} successfully")
+
+
+async def _tool_delete_note(args: dict[str, Any]) -> list[types.TextContent]:
+    note_name = args.get("name")
+    if not note_name:
+        raise ValueError("'name' parameter is required")
+    if note_name in notes:
+        del notes[note_name]
+        return _text(f"Note '{note_name}' deleted successfully")
+    return _text(f"Note '{note_name}' not found")
+
+
+async def _tool_execute_snowflake_sql(args: dict[str, Any]) -> list[types.TextContent]:
+    sql = args.get("sql")
+    if not sql:
+        raise ValueError("'sql' parameter is required")
+    format_type = args.get("format", "json")
+    # No explicit limit; the chokepoint applies the default row cap so
+    # this tool can't be used for an unbounded fetch.
+    return await _run_user_query(sql, format_type, "SQL execution", None)
+
+
+async def _tool_execute_query(args: dict[str, Any]) -> list[types.TextContent]:
+    sql = args.get("sql")
+    if not sql:
+        raise ValueError("'sql' parameter is required")
+    # NOTE: read-only is governed solely by server config; there is
+    # deliberately no client-supplied read_only argument (SEC-C2, SEC-M1).
+    format_type = args.get("format", "markdown")
+    row_limit = _coerce_limit(args.get("limit"))
+    return await _run_user_query(sql, format_type, "Execute query", row_limit)
+
+
+async def _tool_list_snowflake_warehouses(args: dict[str, Any]) -> list[types.TextContent]:
+    include_details = args.get("include_details", True)
+    result = await _execute("SHOW WAREHOUSES", "List warehouses", row_limit=MAX_QUERY_LIMIT)
+    if result["success"]:
+        if include_details:
+            output = json.dumps(result["data"], indent=2, default=str)
+        else:
+            output = "\n".join(row.get("name", "") for row in result["data"])
+        return _text(output)
+    return _text(f"Snowflake error: {result['error']}")
+
+
+async def _tool_list_databases(args: dict[str, Any]) -> list[types.TextContent]:
+    pattern = args.get("pattern")
+    include_details = args.get("include_details", False)
+
+    query = "SHOW DATABASES"
+    if pattern:
+        # Validate before interpolation: SHOW ... LIKE takes no binds (SEC-H1).
+        query += f" LIKE '{validate_like_pattern(pattern, 'pattern')}'"
+
+    result = await _execute(query, "List databases", row_limit=MAX_QUERY_LIMIT)
+    if result["success"]:
+        if include_details:
+            output = json.dumps(result["data"], indent=2, default=str)
+        else:
+            output = "\n".join(row.get("name", "") for row in result["data"])
+        return _text(output)
+    return _text(f"Snowflake error: {result['error']}")
+
+
+async def _tool_export_schema(args: dict[str, Any]) -> list[types.TextContent]:
+    database = args.get("database")
+    format_type = args.get("format", "json")
+    include_data_samples_raw = args.get("include_data_samples", False)
+    if not isinstance(include_data_samples_raw, bool):
+        raise ValueError("'include_data_samples' must be a boolean")
+    include_data_samples = include_data_samples_raw
+    if format_type not in {"json", "yaml", "sql"}:
+        raise ValueError("'format' must be one of: json, yaml, sql")
+
+    schema_data, export_error = await _export_schema_metadata(database, include_data_samples)
+    if export_error:
+        return _text(export_error)
+    if schema_data is None:
+        return _text("Error exporting schema metadata.")
+
+    if format_type == "yaml":
+        output = yaml.safe_dump(schema_data, sort_keys=False, default_flow_style=False)
+    elif format_type == "sql":
+        output = f"-- Schema export generated at {schema_data['exported_at']}\n"
+        output += f"-- Server: {SERVER_INFO['name']} v{SERVER_INFO['version']}\n\n"
+        for db in schema_data["databases"]:
+            output += f"-- Database: {db.get('name', 'Unknown')}\n"
+            for schema in db.get("schemas", []):
+                output += f"--   Schema: {schema.get('name', 'Unknown')}\n"
+                for table in schema.get("tables", []):
+                    output += f"--     Table: {table.get('name', 'Unknown')}\n"
+                for view_row in schema.get("views", []):
+                    output += f"--     View: {view_row.get('name', 'Unknown')}\n"
+    else:  # json
+        output = json.dumps(schema_data, indent=2, default=str)
+
+    return _text(output)
+
+
+_TOOL_HANDLERS = {
+    "get-connection-info": _tool_get_connection_info,
+    "add-note": _tool_add_note,
+    "delete-note": _tool_delete_note,
+    "execute-snowflake-sql": _tool_execute_snowflake_sql,
+    "execute-query": _tool_execute_query,
+    "list-snowflake-warehouses": _tool_list_snowflake_warehouses,
+    "list-databases": _tool_list_databases,
+    "export-schema": _tool_export_schema,
+}
+
+
 @server.call_tool()
 async def handle_call_tool(
     name: str, arguments: dict | None
@@ -1512,144 +1660,10 @@ async def handle_call_tool(
         return _text("Rate limit exceeded. Please slow down and retry shortly.")
 
     try:
-        # Connection and metadata tools
-        if name == "get-connection-info":
-            result = await _execute(
-                "SELECT CURRENT_VERSION(), CURRENT_USER(), CURRENT_DATABASE(), "
-                "CURRENT_SCHEMA(), CURRENT_WAREHOUSE()",
-                "Connection info",
-            )
-            if result["success"]:
-                info = {
-                    "server_info": SERVER_INFO,
-                    "connection_status": "connected",
-                    "snowflake_info": result["data"][0] if result["data"] else {},
-                    "config": safe_config_echo(),
-                    "read_only_mode": READ_ONLY,
-                    "timestamp": datetime.now().isoformat(),
-                }
-                return _text(json.dumps(info, indent=2))
-            return _text(f"Connection error: {result['error']}")
-
-        # Note management tools
-        elif name == "add-note":
-            note_name = args.get("name")
-            content = args.get("content")
-            if not note_name or not content:
-                raise ValueError("Both 'name' and 'content' are required")
-            if len(content) > _NOTES_MAX_LENGTH:
-                raise ValueError(
-                    f"Note content exceeds maximum length of {_NOTES_MAX_LENGTH} characters"
-                )
-            # Bound the in-memory store (SEC-L2): allow updates to existing notes,
-            # but cap the number of distinct notes.
-            if note_name not in notes and len(notes) >= _NOTES_MAX_COUNT:
-                raise ValueError(
-                    f"Note limit reached ({_NOTES_MAX_COUNT}); delete a note before adding more"
-                )
-
-            old_content = notes.get(note_name)
-            notes[note_name] = content
-            return _text(
-                f"Note '{note_name}' {'updated' if old_content else 'created'} successfully"
-            )
-
-        elif name == "delete-note":
-            note_name = args.get("name")
-            if not note_name:
-                raise ValueError("'name' parameter is required")
-            if note_name in notes:
-                del notes[note_name]
-                return _text(f"Note '{note_name}' deleted successfully")
-            return _text(f"Note '{note_name}' not found")
-
-        # Snowflake SQL tools — both route through the same governed path.
-        elif name == "execute-snowflake-sql":
-            sql = args.get("sql")
-            if not sql:
-                raise ValueError("'sql' parameter is required")
-            format_type = args.get("format", "json")
-            # No explicit limit; the chokepoint applies the default row cap so
-            # this tool can't be used for an unbounded fetch.
-            return await _run_user_query(sql, format_type, "SQL execution", None)
-
-        elif name == "execute-query":
-            sql = args.get("sql")
-            if not sql:
-                raise ValueError("'sql' parameter is required")
-            # NOTE: read-only is governed solely by server config; there is
-            # deliberately no client-supplied read_only argument (SEC-C2, SEC-M1).
-            format_type = args.get("format", "markdown")
-            row_limit = _coerce_limit(args.get("limit"))
-            return await _run_user_query(sql, format_type, "Execute query", row_limit)
-
-        elif name == "list-snowflake-warehouses":
-            include_details = args.get("include_details", True)
-            result = await _execute("SHOW WAREHOUSES", "List warehouses", row_limit=MAX_QUERY_LIMIT)
-            if result["success"]:
-                if include_details:
-                    output = json.dumps(result["data"], indent=2, default=str)
-                else:
-                    output = "\n".join(row.get("name", "") for row in result["data"])
-                return _text(output)
-            return _text(f"Snowflake error: {result['error']}")
-
-        elif name == "list-databases":
-            pattern = args.get("pattern")
-            include_details = args.get("include_details", False)
-
-            query = "SHOW DATABASES"
-            if pattern:
-                # Validate before interpolation: SHOW ... LIKE takes no binds (SEC-H1).
-                query += f" LIKE '{validate_like_pattern(pattern, 'pattern')}'"
-
-            result = await _execute(query, "List databases", row_limit=MAX_QUERY_LIMIT)
-            if result["success"]:
-                if include_details:
-                    output = json.dumps(result["data"], indent=2, default=str)
-                else:
-                    output = "\n".join(row.get("name", "") for row in result["data"])
-                return _text(output)
-            return _text(f"Snowflake error: {result['error']}")
-
-        elif name == "export-schema":
-            database = args.get("database")
-            format_type = args.get("format", "json")
-            include_data_samples_raw = args.get("include_data_samples", False)
-            if not isinstance(include_data_samples_raw, bool):
-                raise ValueError("'include_data_samples' must be a boolean")
-            include_data_samples = include_data_samples_raw
-            if format_type not in {"json", "yaml", "sql"}:
-                raise ValueError("'format' must be one of: json, yaml, sql")
-
-            schema_data, export_error = await _export_schema_metadata(
-                database, include_data_samples
-            )
-            if export_error:
-                return _text(export_error)
-            if schema_data is None:
-                return _text("Error exporting schema metadata.")
-
-            if format_type == "yaml":
-                output = yaml.safe_dump(schema_data, sort_keys=False, default_flow_style=False)
-            elif format_type == "sql":
-                output = f"-- Schema export generated at {schema_data['exported_at']}\n"
-                output += f"-- Server: {SERVER_INFO['name']} v{SERVER_INFO['version']}\n\n"
-                for db in schema_data["databases"]:
-                    output += f"-- Database: {db.get('name', 'Unknown')}\n"
-                    for schema in db.get("schemas", []):
-                        output += f"--   Schema: {schema.get('name', 'Unknown')}\n"
-                        for table in schema.get("tables", []):
-                            output += f"--     Table: {table.get('name', 'Unknown')}\n"
-                        for view_row in schema.get("views", []):
-                            output += f"--     View: {view_row.get('name', 'Unknown')}\n"
-            else:  # json
-                output = json.dumps(schema_data, indent=2, default=str)
-
-            return _text(output)
-
-        else:
+        handler = _TOOL_HANDLERS.get(name)
+        if handler is None:
             raise ValueError(f"Unknown tool: {name}")
+        return await handler(args)
 
     except ValueError as e:
         # Our own validation messages are safe to surface verbatim.
