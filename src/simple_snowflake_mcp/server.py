@@ -41,7 +41,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "server": {
         "name": "simple_snowflake_mcp",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "description": "Enhanced Snowflake MCP Server with full protocol compliance",
         "connection": {
             "test_on_startup": True,
