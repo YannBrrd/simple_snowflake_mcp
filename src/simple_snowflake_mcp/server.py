@@ -127,14 +127,28 @@ def _resolve_config_path() -> Path | None:
     return candidate
 
 
+def _ensure_dict(parent: dict[str, Any], key: str) -> dict[str, Any]:
+    """Return parent[key] as a dict, replacing a missing/non-dict value with {}.
+
+    A user/attacker config that overrides a subtree with a scalar or null (e.g.
+    ``snowflake: null`` or ``server: {connection: null}``) must not crash the
+    server when that subtree is later indexed.
+    """
+    value = parent.get(key)
+    if not isinstance(value, dict):
+        value = parent[key] = {}
+    return value
+
+
 def _validate_config(config: dict[str, Any]) -> dict[str, Any]:
     """
     Coerce security-sensitive merged values to safe types/bounds (SEC-M4).
 
     A malicious or mistaken config must not be able to silently disable a control
-    by supplying, e.g., read_only as the string "false" or an absurd query limit.
+    by supplying, e.g., read_only as the string "false" or an absurd query limit,
+    nor crash the server by replacing a config subtree with a non-mapping value.
     """
-    sf = config.setdefault("snowflake", {})
+    sf = _ensure_dict(config, "snowflake")
     sf["read_only"] = _as_bool(sf.get("read_only", True), default=True)
     sf["max_query_limit"] = _as_int(sf.get("max_query_limit", 50000), 50000, 1, 10_000_000)
     sf["default_query_limit"] = _as_int(
@@ -145,14 +159,24 @@ def _validate_config(config: dict[str, Any]) -> dict[str, Any]:
     )
     sf["connection_reuse"] = _as_bool(sf.get("connection_reuse", True), default=True)
 
-    sec = config.setdefault("security", {})
-    rl = sec.setdefault("rate_limit", {})
+    sec = _ensure_dict(config, "security")
+    rl = _ensure_dict(sec, "rate_limit")
     rl["enabled"] = _as_bool(rl.get("enabled", True), default=True)
     rl["max_calls"] = _as_int(rl.get("max_calls", 60), 60, 1, 1_000_000)
     rl["window_seconds"] = _as_int(rl.get("window_seconds", 60), 60, 1, 86_400)
-    nt = sec.setdefault("notes", {})
+    nt = _ensure_dict(sec, "notes")
     nt["max_count"] = _as_int(nt.get("max_count", 100), 100, 0, 1_000_000)
     nt["max_content_length"] = _as_int(nt.get("max_content_length", 10000), 10000, 0, 10_000_000)
+
+    # server.connection is read at import (CONNECTION_TIMEOUT) and at startup
+    # (test_on_startup); normalize it so a malformed override can't crash import.
+    srv = _ensure_dict(config, "server")
+    srv.setdefault("name", DEFAULT_CONFIG["server"]["name"])
+    srv.setdefault("version", DEFAULT_CONFIG["server"]["version"])
+    srv.setdefault("description", DEFAULT_CONFIG["server"]["description"])
+    conn = _ensure_dict(srv, "connection")
+    conn["timeout"] = _as_int(conn.get("timeout", 30), 30, 1, 86_400)
+    conn["test_on_startup"] = _as_bool(conn.get("test_on_startup", True), default=True)
     return config
 
 
@@ -347,15 +371,9 @@ _WRITE_TOKENS = frozenset(
     }
 )
 
-_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
-_LINE_COMMENT_RE = re.compile(r"--[^\n]*")
 _WORD_RE = re.compile(r"[A-Za-z_]+")
-# Spans whose contents must not be interpreted as SQL keywords/separators:
-# dollar-quoted bodies, single-quoted string literals, and double-quoted
-# identifiers (each tolerating doubled-quote escapes).
-_DOLLAR_QUOTE_RE = re.compile(r"\$\$.*?\$\$", re.DOTALL)
-_STRING_LITERAL_RE = re.compile(r"'(?:[^']|'')*'")
-_QUOTED_IDENT_RE = re.compile(r'"(?:[^"]|"")*"')
+# Opening of a dollar-quoted string: $$ or $tag$ (tag is an identifier).
+_DOLLAR_TAG_RE = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
 # A write/DDL token used as a *statement* keyword (followed by whitespace or
 # end-of-input), not as a function call such as REPLACE(...) or GET(...).
 _WRITE_TOKEN_RE = re.compile(
@@ -366,16 +384,51 @@ _WRITE_TOKEN_RE = re.compile(
 
 def _strip_sql_noise(sql: str) -> str:
     """
-    Remove comments and quoted spans so keyword/separator scanning operates only
-    on SQL structure, not on data. Prevents semicolons or keywords inside string
-    literals / identifiers from being mistaken for statement boundaries or DML.
+    Replace comments and quoted spans with a space so keyword/separator scanning
+    operates only on SQL structure, not on data.
+
+    This is a single left-to-right pass (not independent regex substitutions) so
+    that a ``--`` or ``/*`` inside a string literal is treated as data, and a
+    semicolon or keyword inside a literal/identifier/dollar-quote cannot be
+    mistaken for a statement boundary or DML. Recognizes line comments (``--``),
+    block comments (``/* */``), single-quoted strings, double-quoted identifiers
+    (both with doubled-quote escapes), and dollar-quoted strings (``$$``/``$tag$``).
     """
-    sql = _BLOCK_COMMENT_RE.sub(" ", sql)
-    sql = _LINE_COMMENT_RE.sub(" ", sql)
-    sql = _DOLLAR_QUOTE_RE.sub(" ", sql)
-    sql = _STRING_LITERAL_RE.sub(" ", sql)
-    sql = _QUOTED_IDENT_RE.sub(" ", sql)
-    return sql.strip()
+    out: list[str] = []
+    i, n = 0, len(sql)
+    while i < n:
+        ch = sql[i]
+        pair = sql[i : i + 2]
+
+        if pair == "--":  # line comment, to end of line (keep the newline)
+            nl = sql.find("\n", i)
+            i = n if nl == -1 else nl
+            out.append(" ")
+        elif pair == "/*":  # block comment
+            end = sql.find("*/", i + 2)
+            i = n if end == -1 else end + 2
+            out.append(" ")
+        elif ch in "'\"":  # quoted string ('') or identifier ("")
+            i += 1
+            while i < n:
+                if sql[i] == ch:
+                    if i + 1 < n and sql[i + 1] == ch:  # doubled-quote escape
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            out.append(" ")
+        elif ch == "$" and (m := _DOLLAR_TAG_RE.match(sql, i)):  # dollar-quote
+            tag = m.group(0)
+            end = sql.find(tag, i + len(tag))
+            i = n if end == -1 else end + len(tag)
+            out.append(" ")
+        else:
+            out.append(ch)
+            i += 1
+
+    return "".join(out).strip()
 
 
 def is_read_only_sql(sql: str) -> bool:
@@ -440,6 +493,13 @@ def validate_like_pattern(value: str, field: str) -> str:
 _connection = None
 _connection_lock = threading.Lock()
 _error_counter = 0
+# Errors that indicate the connection itself is unusable (network drop, expired
+# session) rather than a problem with the SQL. A reused connection that raises
+# one of these is retried once on a fresh connection.
+_CONNECTION_ERRORS = (
+    snowflake.connector.errors.OperationalError,
+    snowflake.connector.errors.InterfaceError,
+)
 
 
 def _get_connection():
@@ -448,6 +508,18 @@ def _get_connection():
     if _connection is None:
         _connection = snowflake.connector.connect(**get_snowflake_config())
     return _connection
+
+
+def _run_sql_once(query: str, row_limit: int | None) -> Any:
+    """Execute the query on the (possibly cached) connection and return its data."""
+    conn = _get_connection()
+    with conn.cursor() as cur:
+        cur.execute(query)
+        if cur.description:
+            columns = [desc[0] for desc in cur.description]
+            rows = cur.fetchmany(row_limit) if row_limit else cur.fetchall()
+            return [dict(zip(columns, row)) for row in rows]
+        return {"status": "success", "rowcount": cur.rowcount}
 
 
 def _reset_connection() -> None:
@@ -512,20 +584,20 @@ def _safe_snowflake_execute(
 
     try:
         with _connection_lock:
+            # Capture whether we're about to reuse a connection from a previous
+            # call (vs. opening a fresh one). A reused connection may have gone
+            # stale (idle session timeout, proxy/VPN drop); if it fails at the
+            # connection level we reconnect and retry once so the caller doesn't
+            # see a spurious error on the first query after an idle period.
+            reusing = _connection is not None
             try:
-                conn = _get_connection()
-                with conn.cursor() as cur:
-                    cur.execute(query)
-                    if cur.description:
-                        columns = [desc[0] for desc in cur.description]
-                        rows = cur.fetchmany(row_limit) if row_limit else cur.fetchall()
-                        result: Any = [dict(zip(columns, row)) for row in rows]
-                    else:
-                        result = {"status": "success", "rowcount": cur.rowcount}
-            except Exception:
-                # Drop the cached connection so a broken one is not reused.
+                result: Any = _run_sql_once(query, row_limit)
+            except _CONNECTION_ERRORS:
                 _reset_connection()
-                raise
+                if not reusing:
+                    raise
+                logger.info("Snowflake connection appears stale; reconnecting and retrying once")
+                result = _run_sql_once(query, row_limit)
             finally:
                 if not CONNECTION_REUSE:
                     _reset_connection()
@@ -1137,6 +1209,9 @@ def _coerce_limit(raw_limit: Any, sql: str) -> int | None:
     fetchmany, so it is never concatenated into SQL text.
     """
     if raw_limit is not None:
+        # bool is a subclass of int; reject it so limit:true doesn't become 1.
+        if isinstance(raw_limit, bool):
+            raise ValueError("'limit' must be an integer")
         try:
             limit = int(raw_limit)
         except (TypeError, ValueError) as exc:
@@ -1243,7 +1318,10 @@ async def handle_call_tool(
             if not sql:
                 raise ValueError("'sql' parameter is required")
             format_type = args.get("format", "json")
-            return _run_user_query(sql, format_type, "SQL execution", None)
+            # Apply the same default row cap as execute-query so this tool can't
+            # be used to bypass it with an unbounded fetch.
+            row_limit = _coerce_limit(None, sql)
+            return _run_user_query(sql, format_type, "SQL execution", row_limit)
 
         elif name == "execute-query":
             sql = args.get("sql")
