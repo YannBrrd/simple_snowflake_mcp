@@ -29,7 +29,7 @@ The server exposes the following MCP tools to interact with Snowflake:
 - **get-connection-info**: Returns current Snowflake connection information and server status.
 - **list-snowflake-warehouses**: Lists available Data Warehouses (DWH) on Snowflake. Pass `include_details: false` for names only.
 - **list-databases**: Lists all accessible Snowflake databases. Supports a `pattern` filter (wildcards) and `include_details`.
-- **export-schema**: Exports database schema information. Supports `json` (default), `yaml`, and `sql` via `format`, an optional `database` filter, and `include_data_samples`.
+- **export-schema**: Exports hierarchical schema metadata (databases → schemas → tables/views → columns). Supports `json` (default), `yaml`, and `sql` via `format`, an optional `database` filter, and opt-in `include_data_samples` (table rows only, max 3 rows per table).
 
 **Notes (in-memory session state):**
 - **add-note**: Adds or updates a note (`name`, `content`) kept in server memory for the session.
@@ -89,7 +89,7 @@ logging:
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
   file_logging:
     enabled: false        # Set to true to enable file logging
-    filename: "logs/server.log"
+    filename: "logs/server.log"  # Must resolve under repository ./logs/
     max_bytes: 10485760   # Rotate after 10 MB
     backup_count: 5
 
@@ -375,6 +375,16 @@ uv build
 uv publish --token $UV_PUBLISH_TOKEN
 ```
 
+### CI
+
+GitHub Actions CI runs on pushes to `main` and on pull requests via `.github/workflows/ci.yml`:
+
+```bash
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest
+```
+
 ### Debugging with MCP Inspector
 
 Since MCP servers run over stdio, debugging can be challenging. For the best debugging
@@ -500,7 +510,7 @@ The server exposes the following MCP tools (see the [Tools](#tools) section abov
 - **get-connection-info**: Current connection information and server status
 - **list-snowflake-warehouses**: Lists available Data Warehouses with status
 - **list-databases**: Lists all accessible databases, with optional pattern filtering
-- **export-schema**: Exports database schema in JSON, YAML, or SQL format
+- **export-schema**: Exports hierarchical schema metadata in JSON, YAML, or SQL format (with optional capped table samples)
 
 **Session Notes:**
 - **add-note** / **delete-note**: Manage in-memory notes for the session
@@ -534,7 +544,7 @@ logging:
   level: WARNING
   file_logging:
     enabled: true
-    filename: "/var/log/mcp_server.log"
+    filename: "logs/mcp_server.log"
 
 snowflake:
   # Keep true unless the connecting Snowflake role is itself read-only.
