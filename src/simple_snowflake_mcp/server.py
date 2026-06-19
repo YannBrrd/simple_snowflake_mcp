@@ -542,6 +542,27 @@ def validate_like_pattern(value: str, field: str) -> str:
     return value
 
 
+# Exact object names (database/schema/table/view) supplied by the client. Unlike
+# LIKE patterns these name a single object, so wildcards are not allowed.
+_EXACT_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_$]+$")
+
+
+def validate_identifier(value: Any, field: str) -> str:
+    """
+    Validate a client-supplied Snowflake object name (database/schema/table/view).
+
+    SHOW/DESCRIBE statements take no bind parameters for identifiers, so we
+    restrict the value to the unquoted-identifier character class (letters,
+    digits, '_', '$'). The value therefore cannot carry quotes, whitespace, or
+    statement separators and is safe to interpolate. It is left unquoted so
+    Snowflake applies its usual case-insensitive resolution (an unquoted name
+    typed in any case still matches the stored upper-cased object).
+    """
+    if not isinstance(value, str) or not _EXACT_IDENTIFIER_RE.match(value):
+        raise ValueError(f"Invalid {field}: only letters, digits, '_' and '$' are permitted")
+    return value
+
+
 # ---------------------------------------------------------------------------
 # Connection management (CQ-C1, SEC-M2)
 # ---------------------------------------------------------------------------
@@ -810,6 +831,88 @@ async def handle_list_resources() -> list[types.Resource]:
     return resources
 
 
+@server.list_resource_templates()
+async def handle_list_resource_templates() -> list[types.ResourceTemplate]:
+    """
+    List templated Snowflake resources so clients can browse the object hierarchy
+    by filling in URI variables (database/schema/table) rather than only reading
+    the fixed metadata/status resources.
+    """
+    return [
+        types.ResourceTemplate(
+            uriTemplate="snowflake://database/{database}/schemas",
+            name="Schemas in database",
+            description="List schemas in a Snowflake database",
+            mimeType="application/json",
+        ),
+        types.ResourceTemplate(
+            uriTemplate="snowflake://database/{database}/schema/{schema}/tables",
+            name="Tables in schema",
+            description="List tables in a Snowflake schema",
+            mimeType="application/json",
+        ),
+        types.ResourceTemplate(
+            uriTemplate="snowflake://table/{database}/{schema}/{table}",
+            name="Table description",
+            description="Describe the columns of a Snowflake table or view",
+            mimeType="application/json",
+        ),
+    ]
+
+
+def _resource_metadata_json(result: dict[str, Any]) -> str:
+    """Render a SHOW/DESCRIBE result as a timestamped JSON resource body."""
+    if result["success"]:
+        return json.dumps(
+            {"timestamp": datetime.now().isoformat(), "data": result["data"]},
+            indent=2,
+            default=str,
+        )
+    return json.dumps({"error": result["error"]}, indent=2)
+
+
+async def _read_snowflake_template(host: str | None, path_parts: list[str]) -> str | None:
+    """
+    Resolve a templated ``snowflake://`` resource URI. Returns the JSON body, or
+    None if the URI does not match a known template. Identifiers are validated
+    (no quotes/whitespace/separators) so the interpolated SQL is injection-safe.
+    """
+    if host == "database" and len(path_parts) == 2 and path_parts[1] == "schemas":
+        database = validate_identifier(path_parts[0], "database")
+        result = await _execute(
+            f"SHOW SCHEMAS IN DATABASE {database}", "Resource - schemas", row_limit=MAX_QUERY_LIMIT
+        )
+        return _resource_metadata_json(result)
+
+    if (
+        host == "database"
+        and len(path_parts) == 4
+        and path_parts[1] == "schema"
+        and path_parts[3] == "tables"
+    ):
+        database = validate_identifier(path_parts[0], "database")
+        schema = validate_identifier(path_parts[2], "schema")
+        result = await _execute(
+            f"SHOW TABLES IN SCHEMA {database}.{schema}",
+            "Resource - tables",
+            row_limit=MAX_QUERY_LIMIT,
+        )
+        return _resource_metadata_json(result)
+
+    if host == "table" and len(path_parts) == 3:
+        database = validate_identifier(path_parts[0], "database")
+        schema = validate_identifier(path_parts[1], "schema")
+        table = validate_identifier(path_parts[2], "table")
+        result = await _execute(
+            f"DESCRIBE TABLE {database}.{schema}.{table}",
+            "Resource - describe",
+            row_limit=MAX_QUERY_LIMIT,
+        )
+        return _resource_metadata_json(result)
+
+    return None
+
+
 @server.read_resource()
 async def handle_read_resource(uri: AnyUrl) -> str:
     """
@@ -867,6 +970,12 @@ async def handle_read_resource(uri: AnyUrl) -> str:
                 }
             return json.dumps(status_data, indent=2)
 
+        # Fall through to the templated resources (database/schema/table browsing).
+        path_parts = [p for p in (uri.path or "").split("/") if p]
+        template_body = await _read_snowflake_template(uri.host, path_parts)
+        if template_body is not None:
+            return template_body
+
     raise ValueError(f"Unsupported URI scheme or path: {uri}")
 
 
@@ -898,6 +1007,32 @@ async def handle_unsubscribe_resource(uri: AnyUrl) -> None:
         resource_subscriptions[uri_str].discard("default_client")
         if not resource_subscriptions[uri_str]:
             del resource_subscriptions[uri_str]
+
+
+# MCP logging levels (RFC 5424 names) mapped onto Python's logging levels. NOTICE
+# has no Python equivalent (folds to INFO); ALERT/EMERGENCY fold to CRITICAL.
+_MCP_TO_PYTHON_LOG_LEVEL = {
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "notice": logging.INFO,
+    "warning": logging.WARNING,
+    "error": logging.ERROR,
+    "critical": logging.CRITICAL,
+    "alert": logging.CRITICAL,
+    "emergency": logging.CRITICAL,
+}
+
+
+@server.set_logging_level()
+async def handle_set_logging_level(level: types.LoggingLevel) -> None:
+    """
+    Honor a client's logging/setLevel request by adjusting the server's log
+    verbosity. Logging is configured on the root logger (see setup_logging), so
+    the level is applied there.
+    """
+    py_level = _MCP_TO_PYTHON_LOG_LEVEL.get(level, logging.INFO)
+    logging.getLogger().setLevel(py_level)
+    logger.info("Log level set to '%s' (Python level %d) by client request", level, py_level)
 
 
 @server.list_prompts()
@@ -1117,6 +1252,83 @@ Please provide:
     raise ValueError(f"Unknown prompt: {name}")
 
 
+# Static completion values for the enumerated prompt arguments (4a). MCP
+# completion applies to prompts and resource templates only (not tool inputs).
+_PROMPT_ARGUMENT_COMPLETIONS: dict[tuple[str, str], list[str]] = {
+    ("summarize-notes", "style"): ["brief", "detailed", "executive"],
+    ("summarize-notes", "format"): ["text", "markdown", "json"],
+    ("analyze-snowflake-schema", "focus"): ["tables", "views", "functions", "all"],
+    ("generate-sql-query", "complexity"): ["simple", "intermediate", "advanced"],
+}
+
+# Bound completion responses so a large account can't return an unwieldy list.
+_COMPLETION_MAX_VALUES = 100
+
+
+async def _complete_resource_template_argument(
+    argument: types.CompletionArgument, context: types.CompletionContext | None
+) -> list[str]:
+    """
+    Best-effort completion for the database/schema/table variables in the
+    templated Snowflake resources. Live names are fetched via the chokepoint;
+    on any error (or missing prerequisite context) an empty list is returned so
+    completion never surfaces an error to the client.
+    """
+    ctx_args = (context.arguments if context else None) or {}
+    try:
+        if argument.name == "database":
+            result = await _execute(
+                "SHOW DATABASES", "Completion - databases", row_limit=MAX_QUERY_LIMIT
+            )
+        elif argument.name == "schema":
+            database = validate_identifier(ctx_args.get("database", ""), "database")
+            result = await _execute(
+                f"SHOW SCHEMAS IN DATABASE {database}",
+                "Completion - schemas",
+                row_limit=MAX_QUERY_LIMIT,
+            )
+        elif argument.name in ("table", "view"):
+            database = validate_identifier(ctx_args.get("database", ""), "database")
+            schema = validate_identifier(ctx_args.get("schema", ""), "schema")
+            kind = "TABLES" if argument.name == "table" else "VIEWS"
+            result = await _execute(
+                f"SHOW {kind} IN SCHEMA {database}.{schema}",
+                "Completion - objects",
+                row_limit=MAX_QUERY_LIMIT,
+            )
+        else:
+            return []
+    except ValueError:
+        # Prerequisite context (e.g. database) missing or invalid; offer nothing.
+        return []
+
+    if not result["success"]:
+        return []
+    return [row.get("name", "") for row in result["data"] if row.get("name")]
+
+
+@server.completion()
+async def handle_completion(
+    ref: types.PromptReference | types.ResourceTemplateReference,
+    argument: types.CompletionArgument,
+    context: types.CompletionContext | None,
+) -> types.Completion:
+    """
+    Provide argument completions for prompts (enumerated values) and templated
+    Snowflake resources (live database/schema/table names).
+    """
+    if isinstance(ref, types.PromptReference):
+        values = _PROMPT_ARGUMENT_COMPLETIONS.get((ref.name, argument.name), [])
+    else:
+        values = await _complete_resource_template_argument(argument, context)
+
+    prefix = (argument.value or "").lower()
+    if prefix:
+        values = [v for v in values if v.lower().startswith(prefix)]
+    values = values[:_COMPLETION_MAX_VALUES]
+    return types.Completion(values=values, total=len(values), hasMore=False)
+
+
 @server.list_tools()
 async def handle_list_tools() -> list[types.Tool]:
     """
@@ -1230,6 +1442,134 @@ async def handle_list_tools() -> list[types.Tool]:
                         "description": "Include database details and metadata",
                     },
                 },
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="list-schemas",
+            description="List schemas in a Snowflake database with optional filtering",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "database": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Database whose schemas to list",
+                    },
+                    "pattern": {
+                        "type": "string",
+                        "description": "Filter schemas by name pattern (supports wildcards)",
+                        "examples": ["PUBLIC", "STG_%"],
+                    },
+                    "include_details": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Include full schema metadata instead of names only",
+                    },
+                },
+                "required": ["database"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="list-tables",
+            description="List tables in a Snowflake schema with optional filtering",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "database": {"type": "string", "minLength": 1, "description": "Database name"},
+                    "schema": {"type": "string", "minLength": 1, "description": "Schema name"},
+                    "pattern": {
+                        "type": "string",
+                        "description": "Filter tables by name pattern (supports wildcards)",
+                        "examples": ["DIM_%", "%_FACT"],
+                    },
+                    "include_details": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Include full table metadata instead of names only",
+                    },
+                },
+                "required": ["database", "schema"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="list-views",
+            description="List views in a Snowflake schema with optional filtering",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "database": {"type": "string", "minLength": 1, "description": "Database name"},
+                    "schema": {"type": "string", "minLength": 1, "description": "Schema name"},
+                    "pattern": {
+                        "type": "string",
+                        "description": "Filter views by name pattern (supports wildcards)",
+                        "examples": ["V_%"],
+                    },
+                    "include_details": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Include full view metadata instead of names only",
+                    },
+                },
+                "required": ["database", "schema"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="describe-table",
+            description="Describe the columns and types of a Snowflake table or view",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "database": {"type": "string", "minLength": 1, "description": "Database name"},
+                    "schema": {"type": "string", "minLength": 1, "description": "Schema name"},
+                    "table": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Table or view name to describe",
+                    },
+                    "format": {
+                        "type": "string",
+                        "enum": ["json", "markdown", "csv"],
+                        "default": "json",
+                        "description": "Output format for the column listing",
+                    },
+                },
+                "required": ["database", "schema", "table"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
+            name="query-view",
+            description=(
+                "Read rows from a Snowflake table or view by name, with server-enforced "
+                "read-only protection and row limiting"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "database": {"type": "string", "minLength": 1, "description": "Database name"},
+                    "schema": {"type": "string", "minLength": 1, "description": "Schema name"},
+                    "view": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Table or view name to read",
+                    },
+                    "format": {
+                        "type": "string",
+                        "enum": ["markdown", "json", "csv"],
+                        "default": "markdown",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 50000,
+                        "description": "Maximum rows to return",
+                    },
+                },
+                "required": ["database", "schema", "view"],
                 "additionalProperties": False,
             },
         ),
@@ -1594,16 +1934,19 @@ async def _tool_execute_query(args: dict[str, Any]) -> list[types.TextContent]:
     return await _run_user_query(sql, format_type, "Execute query", row_limit)
 
 
+def _format_object_list(result: dict[str, Any], include_details: bool) -> list[types.TextContent]:
+    """Render a SHOW-style result as either full JSON details or a name list."""
+    if not result["success"]:
+        return _text(f"Snowflake error: {result['error']}")
+    if include_details:
+        return _text(json.dumps(result["data"], indent=2, default=str))
+    return _text("\n".join(row.get("name", "") for row in result["data"]))
+
+
 async def _tool_list_snowflake_warehouses(args: dict[str, Any]) -> list[types.TextContent]:
     include_details = args.get("include_details", True)
     result = await _execute("SHOW WAREHOUSES", "List warehouses", row_limit=MAX_QUERY_LIMIT)
-    if result["success"]:
-        if include_details:
-            output = json.dumps(result["data"], indent=2, default=str)
-        else:
-            output = "\n".join(row.get("name", "") for row in result["data"])
-        return _text(output)
-    return _text(f"Snowflake error: {result['error']}")
+    return _format_object_list(result, include_details)
 
 
 async def _tool_list_databases(args: dict[str, Any]) -> list[types.TextContent]:
@@ -1616,13 +1959,97 @@ async def _tool_list_databases(args: dict[str, Any]) -> list[types.TextContent]:
         query += f" LIKE '{validate_like_pattern(pattern, 'pattern')}'"
 
     result = await _execute(query, "List databases", row_limit=MAX_QUERY_LIMIT)
-    if result["success"]:
-        if include_details:
-            output = json.dumps(result["data"], indent=2, default=str)
-        else:
-            output = "\n".join(row.get("name", "") for row in result["data"])
-        return _text(output)
-    return _text(f"Snowflake error: {result['error']}")
+    return _format_object_list(result, include_details)
+
+
+async def _tool_list_schemas(args: dict[str, Any]) -> list[types.TextContent]:
+    database = args.get("database")
+    if not database:
+        raise ValueError("'database' parameter is required")
+    database = validate_identifier(database, "database")
+    pattern = args.get("pattern")
+    include_details = args.get("include_details", False)
+
+    query = f"SHOW SCHEMAS IN DATABASE {database}"
+    if pattern:
+        query += f" LIKE '{validate_like_pattern(pattern, 'pattern')}'"
+
+    result = await _execute(query, "List schemas", row_limit=MAX_QUERY_LIMIT)
+    return _format_object_list(result, include_details)
+
+
+async def _tool_list_tables(args: dict[str, Any]) -> list[types.TextContent]:
+    database = args.get("database")
+    schema = args.get("schema")
+    if not database or not schema:
+        raise ValueError("Both 'database' and 'schema' parameters are required")
+    database = validate_identifier(database, "database")
+    schema = validate_identifier(schema, "schema")
+    pattern = args.get("pattern")
+    include_details = args.get("include_details", False)
+
+    query = f"SHOW TABLES IN SCHEMA {database}.{schema}"
+    if pattern:
+        query += f" LIKE '{validate_like_pattern(pattern, 'pattern')}'"
+
+    result = await _execute(query, "List tables", row_limit=MAX_QUERY_LIMIT)
+    return _format_object_list(result, include_details)
+
+
+async def _tool_list_views(args: dict[str, Any]) -> list[types.TextContent]:
+    database = args.get("database")
+    schema = args.get("schema")
+    if not database or not schema:
+        raise ValueError("Both 'database' and 'schema' parameters are required")
+    database = validate_identifier(database, "database")
+    schema = validate_identifier(schema, "schema")
+    pattern = args.get("pattern")
+    include_details = args.get("include_details", False)
+
+    query = f"SHOW VIEWS IN SCHEMA {database}.{schema}"
+    if pattern:
+        query += f" LIKE '{validate_like_pattern(pattern, 'pattern')}'"
+
+    result = await _execute(query, "List views", row_limit=MAX_QUERY_LIMIT)
+    return _format_object_list(result, include_details)
+
+
+async def _tool_describe_table(args: dict[str, Any]) -> list[types.TextContent]:
+    database = args.get("database")
+    schema = args.get("schema")
+    table = args.get("table")
+    if not database or not schema or not table:
+        raise ValueError("'database', 'schema' and 'table' parameters are all required")
+    database = validate_identifier(database, "database")
+    schema = validate_identifier(schema, "schema")
+    table = validate_identifier(table, "table")
+    format_type = args.get("format", "json")
+
+    # DESCRIBE TABLE also resolves views in Snowflake, so this covers both.
+    result = await _execute(
+        f"DESCRIBE TABLE {database}.{schema}.{table}", "Describe table", row_limit=MAX_QUERY_LIMIT
+    )
+    if not result["success"]:
+        return _text(f"Snowflake error: {result['error']}")
+    return _text(_render_output(result["data"], format_type))
+
+
+async def _tool_query_view(args: dict[str, Any]) -> list[types.TextContent]:
+    database = args.get("database")
+    schema = args.get("schema")
+    view = args.get("view")
+    if not database or not schema or not view:
+        raise ValueError("'database', 'schema' and 'view' parameters are all required")
+    database = validate_identifier(database, "database")
+    schema = validate_identifier(schema, "schema")
+    view = validate_identifier(view, "view")
+    format_type = args.get("format", "markdown")
+    row_limit = _coerce_limit(args.get("limit"))
+
+    # Route through the user-SQL path so the read-only guard and row cap apply;
+    # identifiers are validated above so the interpolation is injection-safe.
+    sql = f"SELECT * FROM {database}.{schema}.{view}"
+    return await _run_user_query(sql, format_type, "Query view", row_limit)
 
 
 async def _tool_export_schema(args: dict[str, Any]) -> list[types.TextContent]:
@@ -1670,6 +2097,11 @@ _TOOL_HANDLERS = {
     "execute-query": _tool_execute_query,
     "list-snowflake-warehouses": _tool_list_snowflake_warehouses,
     "list-databases": _tool_list_databases,
+    "list-schemas": _tool_list_schemas,
+    "list-tables": _tool_list_tables,
+    "list-views": _tool_list_views,
+    "describe-table": _tool_describe_table,
+    "query-view": _tool_query_view,
     "export-schema": _tool_export_schema,
 }
 
@@ -1734,12 +2166,12 @@ async def main():
     notifications = mcp_config["notifications"]
     experimental = mcp_config["experimental_features"]
 
-    # Build experimental capabilities dict
+    # Build experimental capabilities dict. Completion is now a first-class
+    # capability advertised automatically from the registered completion handler
+    # (see get_capabilities), so it is no longer surfaced as an experimental flag.
     experimental_caps = {}
     if experimental.get("resource_subscriptions", False):
         experimental_caps["resourceSubscriptions"] = True
-    if experimental.get("completion_support", False):
-        experimental_caps["completionSupport"] = True
 
     # Run the server using stdin/stdout streams
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
