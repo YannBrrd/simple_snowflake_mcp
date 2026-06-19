@@ -1286,7 +1286,20 @@ _COMPLETION_MAX_VALUES = 100
 # keystroke; without this each keystroke would issue a live Snowflake query for
 # the same object list. Keyed by the SHOW query text; small and time-bounded.
 _COMPLETION_CACHE_TTL = 30.0
+# Cap distinct cached queries so a long-running server browsing many
+# databases/schemas can't grow the cache without bound.
+_COMPLETION_CACHE_MAX = 256
 _completion_cache: dict[str, tuple[float, list[str]]] = {}
+
+
+def _prune_completion_cache(now: float) -> None:
+    """Drop expired entries; if still at capacity, evict the oldest by timestamp."""
+    expired = [k for k, (ts, _) in _completion_cache.items() if now - ts >= _COMPLETION_CACHE_TTL]
+    for key in expired:
+        del _completion_cache[key]
+    while len(_completion_cache) >= _COMPLETION_CACHE_MAX:
+        oldest = min(_completion_cache, key=lambda k: _completion_cache[k][0])
+        del _completion_cache[oldest]
 
 
 async def _completion_names(query: str, description: str) -> list[str]:
@@ -1301,6 +1314,8 @@ async def _completion_names(query: str, description: str) -> list[str]:
     if not result["success"]:
         return []
     names = [row.get("name", "") for row in result["data"] if row.get("name")]
+    if query not in _completion_cache and len(_completion_cache) >= _COMPLETION_CACHE_MAX:
+        _prune_completion_cache(now)
     _completion_cache[query] = (now, names)
     return names
 
@@ -1778,20 +1793,25 @@ async def _run_user_query(
     contents = _text(_render_output(result["data"], format_type))
     if result.get("truncated"):
         # Never silently drop rows: tell the caller the result was capped and how
-        # to retrieve more (including the offset for the next page). Emitted as a
-        # separate content block so it does not corrupt JSON/CSV output.
+        # to retrieve more. Emitted as a separate content block so it does not
+        # corrupt JSON/CSV output.
         next_offset = offset + (result["row_limit"] or 0)
         offset_note = f" (offset {offset})" if offset else ""
-        contents.append(
-            types.TextContent(
-                type="text",
-                text=(
-                    f"Note: results were truncated to {result['row_limit']} rows{offset_note}. "
-                    f"Pass `offset: {next_offset}` to fetch the next page, a higher `limit` "
-                    f"(up to {MAX_QUERY_LIMIT}), or add an explicit LIMIT clause."
-                ),
+        # Only suggest the next-page offset when it is actually reachable:
+        # _coerce_offset clamps any offset above MAX_QUERY_LIMIT, so suggesting a
+        # larger value would make the client silently re-fetch the same page.
+        if next_offset <= MAX_QUERY_LIMIT:
+            advice = (
+                f"Pass `offset: {next_offset}` to fetch the next page, a higher `limit` "
+                f"(up to {MAX_QUERY_LIMIT}), or add an explicit LIMIT clause."
             )
-        )
+        else:
+            advice = (
+                f"The offset paging limit ({MAX_QUERY_LIMIT}) has been reached; add an "
+                "explicit LIMIT/OFFSET clause to your SQL to retrieve further rows."
+            )
+        note = f"Note: results were truncated to {result['row_limit']} rows{offset_note}. {advice}"
+        contents.append(types.TextContent(type="text", text=note))
     return contents
 
 

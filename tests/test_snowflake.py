@@ -564,3 +564,32 @@ async def test_execute_query_rejects_negative_offset(make_connection, patch_conn
     result = await server.handle_call_tool("execute-query", {"sql": "SELECT 1", "offset": -1})
 
     assert "Invalid request" in result[0].text
+
+
+async def test_execute_query_note_when_offset_paging_limit_reached(monkeypatch, patch_connect):
+    # When the next page would exceed MAX_QUERY_LIMIT (which _coerce_offset clamps),
+    # the note must not suggest an unreachable offset that would re-fetch the page.
+    monkeypatch.setattr(server, "MAX_QUERY_LIMIT", 5)
+    patch_connect(_paging_connection([(i,) for i in range(10)], ["N"]))
+
+    result = await server.handle_call_tool(
+        "execute-query", {"sql": "SELECT N FROM t", "limit": 3, "offset": 3}
+    )
+
+    assert len(result) == 2
+    assert "offset: 6" not in result[1].text
+    assert "offset paging limit" in result[1].text.lower()
+
+
+async def test_completion_cache_is_bounded(monkeypatch):
+    monkeypatch.setattr(server, "_COMPLETION_CACHE_MAX", 2)
+
+    async def fake_execute(query, description="Query", *, is_user_sql=False, row_limit=None):
+        return {"success": True, "data": [{"name": "X"}]}
+
+    monkeypatch.setattr(server, "_execute", fake_execute)
+
+    for i in range(5):
+        await server._completion_names(f"SHOW Q{i}", "completion")
+
+    assert len(server._completion_cache) <= 2
