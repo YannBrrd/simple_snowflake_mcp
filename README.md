@@ -23,6 +23,8 @@ The server exposes the following MCP tools to interact with Snowflake:
 **Notes (in-memory session state):**
 - **add-note**: Adds or updates a note (`name`, `content`) kept in server memory for the session.
 - **delete-note**: Deletes an existing note by `name`.
+- **list-notes**: Lists current note names in sorted order.
+- **get-note**: Returns the note payload (`name`, `content`) for a given note name.
 
 ## 🔒 Security Model
 
@@ -502,7 +504,7 @@ The server exposes the following MCP tools (see the [Tools](#tools) section abov
 - **export-schema**: Exports hierarchical schema metadata in JSON, YAML, or SQL format (with optional capped table samples)
 
 **Session Notes:**
-- **add-note** / **delete-note**: Manage in-memory notes for the session
+- **add-note** / **delete-note** / **list-notes** / **get-note**: Manage in-memory notes for the session
 
 The server also implements MCP **resources** (Snowflake objects with subscription support) and **prompts**. For parameter schemas, inspect `handle_list_tools` in `src/simple_snowflake_mcp/server.py`.
 
