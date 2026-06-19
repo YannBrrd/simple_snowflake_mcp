@@ -1159,6 +1159,23 @@ async def handle_list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="list-notes",
+            description="List all existing note names",
+            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
+        ),
+        types.Tool(
+            name="get-note",
+            description="Get an existing note by name",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "minLength": 1, "description": "Note name to read"}
+                },
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
             name="execute-snowflake-sql",
             description="Execute a SQL query on Snowflake and return the result as JSON",
             inputSchema={
@@ -1541,6 +1558,21 @@ async def _tool_delete_note(args: dict[str, Any]) -> list[types.TextContent]:
     return _text(f"Note '{note_name}' not found")
 
 
+async def _tool_list_notes(args: dict[str, Any]) -> list[types.TextContent]:
+    _ = args
+    return _text(json.dumps(sorted(notes.keys())))
+
+
+async def _tool_get_note(args: dict[str, Any]) -> list[types.TextContent]:
+    note_name = args.get("name")
+    if not note_name:
+        raise ValueError("'name' parameter is required")
+    content = notes.get(note_name)
+    if content is None:
+        return _text(f"Note '{note_name}' not found")
+    return _text(json.dumps({"name": note_name, "content": content}))
+
+
 async def _tool_execute_snowflake_sql(args: dict[str, Any]) -> list[types.TextContent]:
     sql = args.get("sql")
     if not sql:
@@ -1632,6 +1664,8 @@ _TOOL_HANDLERS = {
     "get-connection-info": _tool_get_connection_info,
     "add-note": _tool_add_note,
     "delete-note": _tool_delete_note,
+    "list-notes": _tool_list_notes,
+    "get-note": _tool_get_note,
     "execute-snowflake-sql": _tool_execute_snowflake_sql,
     "execute-query": _tool_execute_query,
     "list-snowflake-warehouses": _tool_list_snowflake_warehouses,

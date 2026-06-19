@@ -38,6 +38,25 @@ async def test_add_and_delete_note():
     assert "deleted" in deleted[0].text
 
 
+async def test_list_notes_returns_sorted_names():
+    await server.handle_call_tool("add-note", {"name": "b", "content": "2"})
+    await server.handle_call_tool("add-note", {"name": "a", "content": "1"})
+
+    result = await server.handle_call_tool("list-notes", {})
+
+    assert json.loads(result[0].text) == ["a", "b"]
+
+
+async def test_get_note_returns_content_and_handles_missing_note():
+    await server.handle_call_tool("add-note", {"name": "n", "content": "c"})
+
+    existing = await server.handle_call_tool("get-note", {"name": "n"})
+    missing = await server.handle_call_tool("get-note", {"name": "missing"})
+
+    assert json.loads(existing[0].text) == {"name": "n", "content": "c"}
+    assert "not found" in missing[0].text.lower()
+
+
 async def test_export_schema_includes_hierarchical_metadata_and_samples(monkeypatch):
     async def fake_execute(query, description="Query", *, is_user_sql=False, row_limit=None):
         data_by_query = {
