@@ -1,6 +1,10 @@
 # Missing Features — Implementation Plan
 
-Status: proposal · Target baseline: v0.3.0 · Owner: maintainers
+Status: in progress (Phases 1–3 done) · Target baseline: v0.3.0 · Owner: maintainers
+
+> **Progress:** Phase 1 (discovery tools), Phase 2 (documentation sync), and
+> Phase 3 (test backfill) are implemented. Phase 4 (MCP protocol completeness —
+> completion handler, MCP logging, pagination, resource templates) remains.
 
 This document inventories gaps between what `simple-snowflake-mcp` currently
 ships and what users (and the MCP protocol) reasonably expect, then proposes a

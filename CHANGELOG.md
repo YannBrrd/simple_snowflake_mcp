@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format is loosely
 based on [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- Five Snowflake discovery tools: `list-schemas`, `list-tables`, `list-views`,
+  `describe-table`, and `query-view`. These provide lightweight, granular
+  navigation of the object hierarchy without a full `export-schema`. Client-
+  supplied object names are constrained by a new `validate_identifier`
+  allow-list so the interpolated SQL stays injection-safe, and `query-view`
+  routes through the read-only chokepoint like the other user-SQL tools.
+- Tests for the new discovery tools (including identifier-injection rejection)
+  plus backfilled coverage for `list-snowflake-warehouses` and
+  `get-connection-info`.
+
+### Documentation
+- README now lists the five discovery tools and documents the four MCP prompts
+  (`summarize-notes`, `analyze-snowflake-schema`, `generate-sql-query`,
+  `troubleshoot-connection`) and their arguments.
+- Corrected the tool inventory in `CLAUDE.md` (now 15 tools).
+
 ## [0.3.0]
 
 Security-hardening and reliability release.

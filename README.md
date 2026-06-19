@@ -18,6 +18,11 @@ The server exposes the following MCP tools to interact with Snowflake:
 - **get-connection-info**: Returns current Snowflake connection information and server status.
 - **list-snowflake-warehouses**: Lists available Data Warehouses (DWH) on Snowflake. Pass `include_details: false` for names only.
 - **list-databases**: Lists all accessible Snowflake databases. Supports a `pattern` filter (wildcards) and `include_details`.
+- **list-schemas**: Lists schemas in a `database`. Supports a `pattern` filter (wildcards) and `include_details`.
+- **list-tables**: Lists tables in a `database`/`schema`. Supports a `pattern` filter (wildcards) and `include_details`.
+- **list-views**: Lists views in a `database`/`schema`. Supports a `pattern` filter (wildcards) and `include_details`.
+- **describe-table**: Returns the columns and types of a `database`/`schema`/`table` (works for views too). Supports `json` (default)/`markdown`/`csv` via `format`.
+- **query-view**: Reads rows from a `database`/`schema`/`view` (or table) by name, with the same server-enforced read-only protection and row limiting as `execute-query`. Supports a `limit` and `markdown` (default)/`json`/`csv` via `format`.
 - **export-schema**: Exports hierarchical schema metadata (databases → schemas → tables/views → columns). Supports `json` (default), `yaml`, and `sql` via `format`, an optional `database` filter, and opt-in `include_data_samples` (table rows only, max 3 rows per table).
 
 **Notes (in-memory session state):**
@@ -25,6 +30,16 @@ The server exposes the following MCP tools to interact with Snowflake:
 - **delete-note**: Deletes an existing note by `name`.
 - **list-notes**: Lists current note names in sorted order.
 - **get-note**: Returns the note payload (`name`, `content`) for a given note name.
+
+### Prompts
+
+The server also exposes MCP prompts that bundle server context into ready-to-use
+messages:
+
+- **summarize-notes**: Summarizes the stored notes. Arguments: `style` (`brief`/`detailed`/`executive`), `format` (`text`/`markdown`/`json`).
+- **analyze-snowflake-schema**: Produces a schema-analysis prompt. Arguments: `database` (optional focus), `focus` (`tables`/`views`/`functions`/`all`).
+- **generate-sql-query**: Helps draft a SQL query from a natural-language goal. Arguments: `intent` (required), `complexity` (`simple`/`intermediate`/`advanced`).
+- **troubleshoot-connection**: Builds a connection-troubleshooting prompt. Arguments: `error_message` (optional).
 
 ## 🔒 Security Model
 

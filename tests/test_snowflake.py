@@ -31,6 +31,117 @@ async def test_unknown_tool_is_rejected(make_connection, patch_connect):
     assert "Invalid request" in result[0].text
 
 
+async def test_list_warehouses_names_only(make_connection, patch_connect):
+    patch_connect(make_connection(columns=["name"], rows=[("WH1",), ("WH2",)]))
+
+    result = await server.handle_call_tool("list-snowflake-warehouses", {"include_details": False})
+
+    assert "WH1" in result[0].text and "WH2" in result[0].text
+
+
+async def test_get_connection_info_reports_status(make_connection, patch_connect):
+    patch_connect(make_connection(columns=["CURRENT_USER()"], rows=[("ALICE",)]))
+
+    result = await server.handle_call_tool("get-connection-info", {})
+
+    payload = json.loads(result[0].text)
+    assert payload["connection_status"] == "connected"
+    assert payload["read_only_mode"] is True
+
+
+async def test_list_schemas_builds_scoped_query(monkeypatch):
+    captured = {}
+
+    async def fake_execute(query, description="Query", *, is_user_sql=False, row_limit=None):
+        captured["query"] = query
+        return {"success": True, "data": [{"name": "PUBLIC"}]}
+
+    monkeypatch.setattr(server, "_execute", fake_execute)
+
+    result = await server.handle_call_tool("list-schemas", {"database": "DB1"})
+
+    assert captured["query"] == "SHOW SCHEMAS IN DATABASE DB1"
+    assert "PUBLIC" in result[0].text
+
+
+async def test_list_tables_and_views_scope_to_schema(monkeypatch):
+    captured = []
+
+    async def fake_execute(query, description="Query", *, is_user_sql=False, row_limit=None):
+        captured.append(query)
+        return {"success": True, "data": [{"name": "T1"}]}
+
+    monkeypatch.setattr(server, "_execute", fake_execute)
+
+    await server.handle_call_tool("list-tables", {"database": "DB1", "schema": "PUBLIC"})
+    await server.handle_call_tool("list-views", {"database": "DB1", "schema": "PUBLIC"})
+
+    assert captured == [
+        "SHOW TABLES IN SCHEMA DB1.PUBLIC",
+        "SHOW VIEWS IN SCHEMA DB1.PUBLIC",
+    ]
+
+
+async def test_describe_table_renders_columns(monkeypatch):
+    captured = {}
+
+    async def fake_execute(query, description="Query", *, is_user_sql=False, row_limit=None):
+        captured["query"] = query
+        return {"success": True, "data": [{"name": "ID", "type": "NUMBER"}]}
+
+    monkeypatch.setattr(server, "_execute", fake_execute)
+
+    result = await server.handle_call_tool(
+        "describe-table", {"database": "DB1", "schema": "PUBLIC", "table": "CUSTOMERS"}
+    )
+
+    assert captured["query"] == "DESCRIBE TABLE DB1.PUBLIC.CUSTOMERS"
+    assert json.loads(result[0].text) == [{"name": "ID", "type": "NUMBER"}]
+
+
+async def test_query_view_routes_through_user_query_path(monkeypatch):
+    captured = {}
+
+    async def fake_execute(query, description="Query", *, is_user_sql=False, row_limit=None):
+        captured["query"] = query
+        captured["is_user_sql"] = is_user_sql
+        return {"success": True, "data": [{"ID": 1}], "truncated": False, "row_limit": row_limit}
+
+    monkeypatch.setattr(server, "_execute", fake_execute)
+
+    result = await server.handle_call_tool(
+        "query-view", {"database": "DB1", "schema": "PUBLIC", "view": "V1", "format": "json"}
+    )
+
+    assert captured["query"] == "SELECT * FROM DB1.PUBLIC.V1"
+    assert captured["is_user_sql"] is True
+    assert json.loads(result[0].text) == [{"ID": 1}]
+
+
+async def test_discovery_tools_reject_identifier_injection(monkeypatch):
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("query should be rejected before execution")
+
+    monkeypatch.setattr(server, "_execute", fail_if_called)
+
+    result = await server.handle_call_tool(
+        "describe-table",
+        {"database": "DB1", "schema": "PUBLIC", "table": "T1; DROP TABLE X"},
+    )
+
+    assert "Invalid request" in result[0].text
+
+
+async def test_discovery_tools_require_scope(make_connection, patch_connect):
+    patch_connect(make_connection())
+
+    missing_db = await server.handle_call_tool("list-schemas", {})
+    missing_schema = await server.handle_call_tool("list-tables", {"database": "DB1"})
+
+    assert "Invalid request" in missing_db[0].text
+    assert "Invalid request" in missing_schema[0].text
+
+
 async def test_add_and_delete_note():
     created = await server.handle_call_tool("add-note", {"name": "n", "content": "c"})
     assert "created" in created[0].text

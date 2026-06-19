@@ -47,7 +47,7 @@ The server is built on the `mcp` library's `Server` object (module-global `serve
 Precedence: env vars override `config.yaml` override `DEFAULT_CONFIG`.
 
 ### Tool set
-The code implements 8 tools in `handle_list_tools`/`handle_call_tool`: `get-connection-info`, `add-note`, `delete-note`, `execute-snowflake-sql`, `list-snowflake-warehouses`, `list-databases`, `execute-query`, `export-schema`. (The README's tool list now matches.) When adding a tool, update both the schema in `handle_list_tools` and the dispatch branch — and if it runs user SQL, route it through `_run_user_query` so the guard applies.
+The code implements 15 tools in `handle_list_tools`/`handle_call_tool`: `get-connection-info`, `add-note`, `delete-note`, `list-notes`, `get-note`, `execute-snowflake-sql`, `execute-query`, `list-snowflake-warehouses`, `list-databases`, `list-schemas`, `list-tables`, `list-views`, `describe-table`, `query-view`, `export-schema`. (The README's tool list matches.) The discovery tools (`list-schemas`/`list-tables`/`list-views`/`describe-table`/`query-view`) take client-supplied object names; these go through `validate_identifier` (allow-list of unquoted-identifier chars, no wildcards) so the interpolated SQL is injection-safe. When adding a tool, update both the schema in `handle_list_tools` and the dispatch registry (`_TOOL_HANDLERS`) — and if it runs user SQL, route it through `_run_user_query` so the guard applies (`query-view` does this).
 
 ## Conventions
 
