@@ -29,6 +29,9 @@ Feature release: granular discovery tools and fuller MCP protocol coverage.
   `snowflake://database/{database}/schema/{schema}/tables`,
   `snowflake://table/{database}/{schema}/{table}`), resolved through the same
   validated, injection-safe identifier path as the discovery tools.
+- Offset-based pagination on `execute-query` and `query-view` via a bounded
+  `offset` argument. Rows are skipped at the driver (the SQL text is never
+  rewritten), and a truncated result reports the `offset` for the next page.
 
 ### Documentation
 - README now lists the five discovery tools, documents the four MCP prompts

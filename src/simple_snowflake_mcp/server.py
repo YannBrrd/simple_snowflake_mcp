@@ -586,18 +586,26 @@ def _get_connection():
     return _connection
 
 
-def _run_sql_once(query: str, row_limit: int | None) -> tuple[Any, bool]:
+def _run_sql_once(query: str, row_limit: int | None, offset: int = 0) -> tuple[Any, bool]:
     """Execute the query on the (possibly cached) connection.
 
     Returns ``(data, truncated)``. When ``row_limit`` is set we fetch one extra
     row so we can tell the caller whether the result was capped, then trim back
     to ``row_limit`` — the truncation is reported rather than hidden (SEC-H2).
+
+    ``offset`` pages results by discarding that many leading rows at the driver
+    via ``fetchmany`` rather than editing the SQL text, preserving the invariant
+    that user SQL is never rewritten.
     """
     conn = _get_connection()
     with conn.cursor() as cur:
         cur.execute(query)
         if cur.description:
             columns = [desc[0] for desc in cur.description]
+            if offset:
+                # Skip the first `offset` rows for paging; the value is bounded by
+                # _coerce_offset so this discard is bounded too.
+                cur.fetchmany(offset)
             if row_limit:
                 rows = list(cur.fetchmany(row_limit + 1))
                 truncated = len(rows) > row_limit
@@ -639,6 +647,7 @@ def _safe_snowflake_execute(
     *,
     is_user_sql: bool = False,
     row_limit: int | None = None,
+    offset: int = 0,
 ) -> dict[str, Any]:
     """
     Execute a Snowflake query with read-only enforcement, resource-safe cleanup,
@@ -684,19 +693,25 @@ def _safe_snowflake_execute(
             # see a spurious error on the first query after an idle period.
             reusing = _connection is not None
             try:
-                result, truncated = _run_sql_once(query, row_limit)
+                result, truncated = _run_sql_once(query, row_limit, offset)
             except _CONNECTION_ERRORS:
                 _reset_connection()
                 if not reusing:
                     raise
                 logger.info("Snowflake connection appears stale; reconnecting and retrying once")
-                result, truncated = _run_sql_once(query, row_limit)
+                result, truncated = _run_sql_once(query, row_limit, offset)
             finally:
                 if not CONNECTION_REUSE:
                     _reset_connection()
 
         logger.info("%s completed successfully", description)
-        return {"success": True, "data": result, "truncated": truncated, "row_limit": row_limit}
+        return {
+            "success": True,
+            "data": result,
+            "truncated": truncated,
+            "row_limit": row_limit,
+            "offset": offset,
+        }
 
     except SnowflakeConfigError as e:
         # Safe to surface: contains only which env vars are missing, no secrets.
@@ -717,6 +732,7 @@ async def _execute(
     *,
     is_user_sql: bool = False,
     row_limit: int | None = None,
+    offset: int = 0,
 ) -> dict[str, Any]:
     """
     Await the synchronous chokepoint on a worker thread.
@@ -733,6 +749,7 @@ async def _execute(
         description,
         is_user_sql=is_user_sql,
         row_limit=row_limit,
+        offset=offset,
     )
 
 
@@ -1568,6 +1585,12 @@ async def handle_list_tools() -> list[types.Tool]:
                         "maximum": 50000,
                         "description": "Maximum rows to return",
                     },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 50000,
+                        "description": "Number of leading rows to skip (paging)",
+                    },
                 },
                 "required": ["database", "schema", "view"],
                 "additionalProperties": False,
@@ -1598,6 +1621,12 @@ async def handle_list_tools() -> list[types.Tool]:
                         "minimum": 1,
                         "maximum": 50000,
                         "description": "Maximum rows to return",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 50000,
+                        "description": "Number of leading rows to skip (paging)",
                     },
                 },
                 "required": ["sql"],
@@ -1679,6 +1708,28 @@ def _coerce_limit(raw_limit: Any) -> int | None:
     return max(1, min(limit, MAX_QUERY_LIMIT))
 
 
+def _coerce_offset(raw_offset: Any) -> int:
+    """
+    Coerce a client-supplied paging offset to a bounded, non-negative integer.
+
+    Offset paging discards leading rows at the driver (see _run_sql_once), so it
+    is bounded by MAX_QUERY_LIMIT to keep the discard cost bounded. Returns 0
+    when no offset is given.
+    """
+    if raw_offset is None:
+        return 0
+    # bool is a subclass of int; reject it so offset:true doesn't become 1.
+    if isinstance(raw_offset, bool):
+        raise ValueError("'offset' must be an integer")
+    try:
+        offset = int(raw_offset)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("'offset' must be an integer") from exc
+    if offset < 0:
+        raise ValueError("'offset' must be greater than or equal to 0")
+    return min(offset, MAX_QUERY_LIMIT)
+
+
 def _default_row_cap(sql: str) -> int | None:
     """
     Default row cap for row-producing reads (SELECT and WITH ... SELECT) that do
@@ -1695,29 +1746,31 @@ def _default_row_cap(sql: str) -> int | None:
 
 
 async def _run_user_query(
-    sql: str, format_type: str, description: str, row_limit: int | None
+    sql: str, format_type: str, description: str, row_limit: int | None, offset: int = 0
 ) -> list[types.TextContent]:
     """
     Shared execution path for the user-facing SQL tools (CQ-M1). Read-only
     enforcement and row limiting happen inside _safe_snowflake_execute, the single
-    SQL chokepoint, so neither tool can bypass them.
+    SQL chokepoint, so neither tool can bypass them. ``offset`` pages the result.
     """
-    result = await _execute(sql, description, is_user_sql=True, row_limit=row_limit)
+    result = await _execute(sql, description, is_user_sql=True, row_limit=row_limit, offset=offset)
     if not result["success"]:
         return _text(f"Snowflake error: {result['error']}")
 
     contents = _text(_render_output(result["data"], format_type))
     if result.get("truncated"):
         # Never silently drop rows: tell the caller the result was capped and how
-        # to retrieve more. Emitted as a separate content block so it does not
-        # corrupt JSON/CSV output.
+        # to retrieve more (including the offset for the next page). Emitted as a
+        # separate content block so it does not corrupt JSON/CSV output.
+        next_offset = offset + (result["row_limit"] or 0)
+        offset_note = f" (offset {offset})" if offset else ""
         contents.append(
             types.TextContent(
                 type="text",
                 text=(
-                    f"Note: results were truncated to {result['row_limit']} rows. "
-                    f"Pass a higher `limit` (up to {MAX_QUERY_LIMIT}) or add an explicit "
-                    "LIMIT clause to retrieve more."
+                    f"Note: results were truncated to {result['row_limit']} rows{offset_note}. "
+                    f"Pass `offset: {next_offset}` to fetch the next page, a higher `limit` "
+                    f"(up to {MAX_QUERY_LIMIT}), or add an explicit LIMIT clause."
                 ),
             )
         )
@@ -1931,7 +1984,8 @@ async def _tool_execute_query(args: dict[str, Any]) -> list[types.TextContent]:
     # deliberately no client-supplied read_only argument (SEC-C2, SEC-M1).
     format_type = args.get("format", "markdown")
     row_limit = _coerce_limit(args.get("limit"))
-    return await _run_user_query(sql, format_type, "Execute query", row_limit)
+    offset = _coerce_offset(args.get("offset"))
+    return await _run_user_query(sql, format_type, "Execute query", row_limit, offset)
 
 
 def _format_object_list(result: dict[str, Any], include_details: bool) -> list[types.TextContent]:
@@ -2045,11 +2099,12 @@ async def _tool_query_view(args: dict[str, Any]) -> list[types.TextContent]:
     view = validate_identifier(view, "view")
     format_type = args.get("format", "markdown")
     row_limit = _coerce_limit(args.get("limit"))
+    offset = _coerce_offset(args.get("offset"))
 
     # Route through the user-SQL path so the read-only guard and row cap apply;
     # identifiers are validated above so the interpolation is injection-safe.
     sql = f"SELECT * FROM {database}.{schema}.{view}"
-    return await _run_user_query(sql, format_type, "Query view", row_limit)
+    return await _run_user_query(sql, format_type, "Query view", row_limit, offset)
 
 
 async def _tool_export_schema(args: dict[str, Any]) -> list[types.TextContent]:

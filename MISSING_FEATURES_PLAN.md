@@ -2,10 +2,9 @@
 
 Status: in progress · Target baseline: v0.3.0 · Owner: maintainers
 
-> **Progress:** Phases 1–3 (discovery tools, documentation sync, test backfill)
-> and most of Phase 4 are implemented: MCP completion (4a), MCP logging (4b),
-> and resource templates (4d). The only remaining item is pagination (4c),
-> intentionally deferred — see the note under Phase 4.
+> **Progress:** All phases are implemented — discovery tools (1), documentation
+> sync (2), test backfill (3), and Phase 4 in full: MCP completion (4a), MCP
+> logging (4b), offset pagination (4c), and resource templates (4d).
 
 This document inventories gaps between what `simple-snowflake-mcp` currently
 ships and what users (and the MCP protocol) reasonably expect, then proposes a
@@ -128,12 +127,11 @@ Cheap, no code risk; can land alongside Phase 1.
 - **Resource templates** ✅ done: templated `snowflake://` URIs expose
   schema/table browsing, resolved through the same validated identifier path as
   the discovery tools.
-- **Pagination** ⏸ deferred: the chokepoint deliberately bounds rows at the
-  driver via `fetchmany` rather than editing SQL text. Efficient offset/cursor
-  paging would require either rewriting SQL (breaks that invariant) or
-  fetch-and-discard (wasteful for deep pages), so it is intentionally not
-  shipped. Callers can page with an explicit `LIMIT`/`OFFSET` in
-  `execute-query`, or raise `limit` on the result-returning tools.
+- **Pagination** ✅ done: `execute-query` and `query-view` accept a bounded
+  `offset` that skips leading rows at the driver via `fetchmany` (the SQL text
+  is never rewritten, preserving the chokepoint invariant). The offset is
+  capped at `MAX_QUERY_LIMIT` so the fetch-and-discard cost stays bounded, and a
+  truncated result reports the `offset` for the next page.
 
 Phase 4 items are independent and can be picked up individually.
 
@@ -148,7 +146,7 @@ Phase 4 items are independent and can be picked up individually.
 | 3     | Test backfill                  | S–M    | Low   | P1       |
 | 4a    | Completion handler / honest cap| M      | Med   | P1 ✅     |
 | 4b    | MCP logging                    | S      | Low   | P2 ✅     |
-| 4c    | Pagination                     | M      | Med   | P2 ⏸      |
+| 4c    | Pagination                     | M      | Med   | P2 ✅     |
 | 4d    | Resource templates             | M      | Med   | P3 ✅     |
 
 ## Risks & invariants to preserve

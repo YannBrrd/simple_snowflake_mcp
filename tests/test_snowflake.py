@@ -107,7 +107,9 @@ async def test_describe_table_renders_columns(monkeypatch):
 async def test_query_view_routes_through_user_query_path(monkeypatch):
     captured = {}
 
-    async def fake_execute(query, description="Query", *, is_user_sql=False, row_limit=None):
+    async def fake_execute(
+        query, description="Query", *, is_user_sql=False, row_limit=None, offset=0
+    ):
         captured["query"] = query
         captured["is_user_sql"] = is_user_sql
         return {"success": True, "data": [{"ID": 1}], "truncated": False, "row_limit": row_limit}
@@ -421,3 +423,105 @@ async def test_subscribe_and_unsubscribe_resource():
 
     await server.handle_unsubscribe_resource(uri)
     assert str(uri) not in server.resource_subscriptions
+
+
+# ---------------------------------------------------------------------------
+# Pagination (offset)
+# ---------------------------------------------------------------------------
+def _paging_connection(all_rows, columns):
+    """A connection mock whose cursor consumes rows positionally across fetches.
+
+    Unlike the shared make_connection fixture (which returns the same rows on
+    every fetchmany), this honors fetchmany(size)/fetchall so offset paging can
+    be exercised end to end.
+    """
+    from unittest.mock import MagicMock
+
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.description = [(c,) for c in columns]
+    state = {"pos": 0}
+
+    def fetchmany(size):
+        start = state["pos"]
+        chunk = all_rows[start : start + size]
+        state["pos"] = start + len(chunk)
+        return chunk
+
+    def fetchall():
+        start = state["pos"]
+        state["pos"] = len(all_rows)
+        return all_rows[start:]
+
+    cur.fetchmany.side_effect = fetchmany
+    cur.fetchall.side_effect = fetchall
+    cursor_cm = MagicMock()
+    cursor_cm.__enter__.return_value = cur
+    cursor_cm.__exit__.return_value = False
+    conn.cursor.return_value = cursor_cm
+    return conn
+
+
+def test_coerce_offset_bounds_and_validates():
+    assert server._coerce_offset(None) == 0
+    assert server._coerce_offset("5") == 5
+    assert server._coerce_offset(10**9) == server.MAX_QUERY_LIMIT
+    with pytest.raises(ValueError):
+        server._coerce_offset(-1)
+    with pytest.raises(ValueError):
+        server._coerce_offset(True)
+    with pytest.raises(ValueError):
+        server._coerce_offset("not-an-int")
+
+
+async def test_execute_query_offset_pages_rows(patch_connect):
+    patch_connect(_paging_connection([(i,) for i in range(10)], ["N"]))
+
+    result = await server.handle_call_tool(
+        "execute-query", {"sql": "SELECT N FROM t", "format": "json", "limit": 3, "offset": 3}
+    )
+
+    assert [row["N"] for row in json.loads(result[0].text)] == [3, 4, 5]
+
+
+async def test_execute_query_truncation_note_points_to_next_page(patch_connect):
+    patch_connect(_paging_connection([(i,) for i in range(10)], ["N"]))
+
+    result = await server.handle_call_tool(
+        "execute-query", {"sql": "SELECT N FROM t", "limit": 3, "offset": 3}
+    )
+
+    assert len(result) == 2
+    assert "offset: 6" in result[1].text
+
+
+async def test_query_view_passes_offset_through(monkeypatch):
+    captured = {}
+
+    async def fake_execute(
+        query, description="Query", *, is_user_sql=False, row_limit=None, offset=0
+    ):
+        captured["offset"] = offset
+        return {
+            "success": True,
+            "data": [],
+            "truncated": False,
+            "row_limit": row_limit,
+            "offset": offset,
+        }
+
+    monkeypatch.setattr(server, "_execute", fake_execute)
+
+    await server.handle_call_tool(
+        "query-view", {"database": "D", "schema": "S", "view": "V", "limit": 5, "offset": 10}
+    )
+
+    assert captured["offset"] == 10
+
+
+async def test_execute_query_rejects_negative_offset(make_connection, patch_connect):
+    patch_connect(make_connection())
+
+    result = await server.handle_call_tool("execute-query", {"sql": "SELECT 1", "offset": -1})
+
+    assert "Invalid request" in result[0].text
