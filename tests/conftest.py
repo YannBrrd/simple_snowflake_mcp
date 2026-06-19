@@ -49,6 +49,7 @@ def reset_server_state(monkeypatch):
     monkeypatch.setattr(server, "_RATE_LIMIT_ENABLED", False)
     monkeypatch.setattr(server, "READ_ONLY", True)
     server.notes.clear()
+    server._completion_cache.clear()
     monkeypatch.setenv("SNOWFLAKE_USER", "u")
     monkeypatch.setenv("SNOWFLAKE_PASSWORD", "p")
     monkeypatch.setenv("SNOWFLAKE_ACCOUNT", "a")

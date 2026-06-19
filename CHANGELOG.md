@@ -40,6 +40,14 @@ Feature release: granular discovery tools and fuller MCP protocol coverage.
   completion/logging/resource-template capabilities.
 - Corrected the tool inventory in `CLAUDE.md` (now 15 tools).
 
+### Fixed
+- Completion now reports the true match count in `total` and sets `hasMore`
+  when the result exceeds the response cap, instead of claiming exactly the
+  capped number of options exist.
+- The `snowflake://schema/metadata` and `snowflake://status/connection`
+  resources now serialize datetime/Decimal columns safely (`default=str`),
+  avoiding a `TypeError` on results such as `created_on` / `CURRENT_TIMESTAMP()`.
+
 ## [0.3.0]
 
 Security-hardening and reliability release.

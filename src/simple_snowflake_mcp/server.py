@@ -961,6 +961,7 @@ async def handle_read_resource(uri: AnyUrl) -> str:
                         "connection_config": safe_config_echo(),
                     },
                     indent=2,
+                    default=str,
                 )
             else:
                 return json.dumps({"error": result["error"]}, indent=2)
@@ -985,7 +986,7 @@ async def handle_read_resource(uri: AnyUrl) -> str:
                     "error": result["error"],
                     "read_only_mode": READ_ONLY,
                 }
-            return json.dumps(status_data, indent=2)
+            return json.dumps(status_data, indent=2, default=str)
 
         # Fall through to the templated resources (database/schema/table browsing).
         path_parts = [p for p in (uri.path or "").split("/") if p]
@@ -1281,47 +1282,59 @@ _PROMPT_ARGUMENT_COMPLETIONS: dict[tuple[str, str], list[str]] = {
 # Bound completion responses so a large account can't return an unwieldy list.
 _COMPLETION_MAX_VALUES = 100
 
+# Short-TTL cache for completion name lookups. Completion fires one request per
+# keystroke; without this each keystroke would issue a live Snowflake query for
+# the same object list. Keyed by the SHOW query text; small and time-bounded.
+_COMPLETION_CACHE_TTL = 30.0
+_completion_cache: dict[str, tuple[float, list[str]]] = {}
+
+
+async def _completion_names(query: str, description: str) -> list[str]:
+    """Return object names for a completion SHOW query, cached for a short TTL."""
+    now = time.monotonic()
+    cached = _completion_cache.get(query)
+    if cached and now - cached[0] < _COMPLETION_CACHE_TTL:
+        return cached[1]
+    # A concurrent miss may issue a duplicate query; that is harmless (the event
+    # loop is single-threaded and the result is identical), so no lock is needed.
+    result = await _execute(query, description, row_limit=MAX_QUERY_LIMIT)
+    if not result["success"]:
+        return []
+    names = [row.get("name", "") for row in result["data"] if row.get("name")]
+    _completion_cache[query] = (now, names)
+    return names
+
 
 async def _complete_resource_template_argument(
     argument: types.CompletionArgument, context: types.CompletionContext | None
 ) -> list[str]:
     """
     Best-effort completion for the database/schema/table variables in the
-    templated Snowflake resources. Live names are fetched via the chokepoint;
-    on any error (or missing prerequisite context) an empty list is returned so
-    completion never surfaces an error to the client.
+    templated Snowflake resources. Live names are fetched via the chokepoint
+    (cached briefly); on any error (or missing prerequisite context) an empty
+    list is returned so completion never surfaces an error to the client.
     """
     ctx_args = (context.arguments if context else None) or {}
     try:
         if argument.name == "database":
-            result = await _execute(
-                "SHOW DATABASES", "Completion - databases", row_limit=MAX_QUERY_LIMIT
-            )
+            query, description = "SHOW DATABASES", "Completion - databases"
         elif argument.name == "schema":
             database = validate_identifier(ctx_args.get("database", ""), "database")
-            result = await _execute(
-                f"SHOW SCHEMAS IN DATABASE {database}",
-                "Completion - schemas",
-                row_limit=MAX_QUERY_LIMIT,
-            )
+            query = f"SHOW SCHEMAS IN DATABASE {database}"
+            description = "Completion - schemas"
         elif argument.name in ("table", "view"):
             database = validate_identifier(ctx_args.get("database", ""), "database")
             schema = validate_identifier(ctx_args.get("schema", ""), "schema")
             kind = "TABLES" if argument.name == "table" else "VIEWS"
-            result = await _execute(
-                f"SHOW {kind} IN SCHEMA {database}.{schema}",
-                "Completion - objects",
-                row_limit=MAX_QUERY_LIMIT,
-            )
+            query = f"SHOW {kind} IN SCHEMA {database}.{schema}"
+            description = "Completion - objects"
         else:
             return []
     except ValueError:
         # Prerequisite context (e.g. database) missing or invalid; offer nothing.
         return []
 
-    if not result["success"]:
-        return []
-    return [row.get("name", "") for row in result["data"] if row.get("name")]
+    return await _completion_names(query, description)
 
 
 @server.completion()
@@ -1342,8 +1355,12 @@ async def handle_completion(
     prefix = (argument.value or "").lower()
     if prefix:
         values = [v for v in values if v.lower().startswith(prefix)]
-    values = values[:_COMPLETION_MAX_VALUES]
-    return types.Completion(values=values, total=len(values), hasMore=False)
+    # Report the full match count and whether more exist beyond the cap, so the
+    # client isn't told there are exactly _COMPLETION_MAX_VALUES options when the
+    # list was truncated (MCP: total may exceed the values actually returned).
+    total = len(values)
+    limited = values[:_COMPLETION_MAX_VALUES]
+    return types.Completion(values=limited, total=total, hasMore=total > _COMPLETION_MAX_VALUES)
 
 
 @server.list_tools()
@@ -1687,25 +1704,32 @@ def _render_output(data: Any, format_type: str) -> str:
     return json.dumps(data, indent=2, default=str)
 
 
+def _coerce_int(raw: Any, field: str) -> int:
+    """
+    Coerce a client-supplied value to an int, never trusting the schema-declared
+    type (SEC-H2): a non-conforming client could send a string or an out-of-range
+    value. bool is rejected because it is a subclass of int, so ``field:true``
+    must not silently become 1.
+    """
+    if isinstance(raw, bool):
+        raise ValueError(f"'{field}' must be an integer")
+    try:
+        return int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"'{field}' must be an integer") from exc
+
+
 def _coerce_limit(raw_limit: Any) -> int | None:
     """
     Coerce an explicit client-supplied row limit to a bounded integer (SEC-H2).
 
-    Never trusts the schema-declared type: a non-conforming client could send a
-    string or an out-of-range value. Returns None when no explicit limit is
-    given, in which case the chokepoint applies the default cap. The limit is
-    applied at the driver via fetchmany, never concatenated into SQL text.
+    Returns None when no explicit limit is given, in which case the chokepoint
+    applies the default cap. The limit is applied at the driver via fetchmany,
+    never concatenated into SQL text.
     """
     if raw_limit is None:
         return None
-    # bool is a subclass of int; reject it so limit:true doesn't become 1.
-    if isinstance(raw_limit, bool):
-        raise ValueError("'limit' must be an integer")
-    try:
-        limit = int(raw_limit)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("'limit' must be an integer") from exc
-    return max(1, min(limit, MAX_QUERY_LIMIT))
+    return max(1, min(_coerce_int(raw_limit, "limit"), MAX_QUERY_LIMIT))
 
 
 def _coerce_offset(raw_offset: Any) -> int:
@@ -1718,13 +1742,7 @@ def _coerce_offset(raw_offset: Any) -> int:
     """
     if raw_offset is None:
         return 0
-    # bool is a subclass of int; reject it so offset:true doesn't become 1.
-    if isinstance(raw_offset, bool):
-        raise ValueError("'offset' must be an integer")
-    try:
-        offset = int(raw_offset)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("'offset' must be an integer") from exc
+    offset = _coerce_int(raw_offset, "offset")
     if offset < 0:
         raise ValueError("'offset' must be greater than or equal to 0")
     return min(offset, MAX_QUERY_LIMIT)
@@ -2003,17 +2021,24 @@ async def _tool_list_snowflake_warehouses(args: dict[str, Any]) -> list[types.Te
     return _format_object_list(result, include_details)
 
 
-async def _tool_list_databases(args: dict[str, Any]) -> list[types.TextContent]:
+async def _list_objects(
+    scope_sql: str, description: str, args: dict[str, Any]
+) -> list[types.TextContent]:
+    """
+    Run a ``SHOW ...`` listing query with an optional client ``pattern`` LIKE
+    filter and format the result. ``scope_sql`` must already contain any
+    validated identifiers (callers validate them before building the scope).
+    """
     pattern = args.get("pattern")
-    include_details = args.get("include_details", False)
-
-    query = "SHOW DATABASES"
     if pattern:
         # Validate before interpolation: SHOW ... LIKE takes no binds (SEC-H1).
-        query += f" LIKE '{validate_like_pattern(pattern, 'pattern')}'"
+        scope_sql += f" LIKE '{validate_like_pattern(pattern, 'pattern')}'"
+    result = await _execute(scope_sql, description, row_limit=MAX_QUERY_LIMIT)
+    return _format_object_list(result, args.get("include_details", False))
 
-    result = await _execute(query, "List databases", row_limit=MAX_QUERY_LIMIT)
-    return _format_object_list(result, include_details)
+
+async def _tool_list_databases(args: dict[str, Any]) -> list[types.TextContent]:
+    return await _list_objects("SHOW DATABASES", "List databases", args)
 
 
 async def _tool_list_schemas(args: dict[str, Any]) -> list[types.TextContent]:
@@ -2021,15 +2046,7 @@ async def _tool_list_schemas(args: dict[str, Any]) -> list[types.TextContent]:
     if not database:
         raise ValueError("'database' parameter is required")
     database = validate_identifier(database, "database")
-    pattern = args.get("pattern")
-    include_details = args.get("include_details", False)
-
-    query = f"SHOW SCHEMAS IN DATABASE {database}"
-    if pattern:
-        query += f" LIKE '{validate_like_pattern(pattern, 'pattern')}'"
-
-    result = await _execute(query, "List schemas", row_limit=MAX_QUERY_LIMIT)
-    return _format_object_list(result, include_details)
+    return await _list_objects(f"SHOW SCHEMAS IN DATABASE {database}", "List schemas", args)
 
 
 async def _tool_list_tables(args: dict[str, Any]) -> list[types.TextContent]:
@@ -2039,15 +2056,7 @@ async def _tool_list_tables(args: dict[str, Any]) -> list[types.TextContent]:
         raise ValueError("Both 'database' and 'schema' parameters are required")
     database = validate_identifier(database, "database")
     schema = validate_identifier(schema, "schema")
-    pattern = args.get("pattern")
-    include_details = args.get("include_details", False)
-
-    query = f"SHOW TABLES IN SCHEMA {database}.{schema}"
-    if pattern:
-        query += f" LIKE '{validate_like_pattern(pattern, 'pattern')}'"
-
-    result = await _execute(query, "List tables", row_limit=MAX_QUERY_LIMIT)
-    return _format_object_list(result, include_details)
+    return await _list_objects(f"SHOW TABLES IN SCHEMA {database}.{schema}", "List tables", args)
 
 
 async def _tool_list_views(args: dict[str, Any]) -> list[types.TextContent]:
@@ -2057,15 +2066,7 @@ async def _tool_list_views(args: dict[str, Any]) -> list[types.TextContent]:
         raise ValueError("Both 'database' and 'schema' parameters are required")
     database = validate_identifier(database, "database")
     schema = validate_identifier(schema, "schema")
-    pattern = args.get("pattern")
-    include_details = args.get("include_details", False)
-
-    query = f"SHOW VIEWS IN SCHEMA {database}.{schema}"
-    if pattern:
-        query += f" LIKE '{validate_like_pattern(pattern, 'pattern')}'"
-
-    result = await _execute(query, "List views", row_limit=MAX_QUERY_LIMIT)
-    return _format_object_list(result, include_details)
+    return await _list_objects(f"SHOW VIEWS IN SCHEMA {database}.{schema}", "List views", args)
 
 
 async def _tool_describe_table(args: dict[str, Any]) -> list[types.TextContent]:

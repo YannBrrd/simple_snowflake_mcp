@@ -177,6 +177,45 @@ async def test_completion_completes_database_names(monkeypatch):
     assert completion.values == ["DB1"]
 
 
+async def test_completion_reports_total_and_has_more_when_capped(monkeypatch):
+    many = [{"name": f"DB{i:04d}"} for i in range(150)]
+
+    async def fake_execute(query, description="Query", *, is_user_sql=False, row_limit=None):
+        return {"success": True, "data": many}
+
+    monkeypatch.setattr(server, "_execute", fake_execute)
+
+    completion = await server.handle_completion(
+        types.ResourceTemplateReference(
+            type="ref/resource", uri="snowflake://database/{database}/schemas"
+        ),
+        types.CompletionArgument(name="database", value=""),
+        None,
+    )
+
+    assert len(completion.values) == server._COMPLETION_MAX_VALUES
+    assert completion.total == 150
+    assert completion.hasMore is True
+
+
+async def test_completion_caches_lookups(monkeypatch):
+    calls = {"n": 0}
+
+    async def fake_execute(query, description="Query", *, is_user_sql=False, row_limit=None):
+        calls["n"] += 1
+        return {"success": True, "data": [{"name": "DB1"}]}
+
+    monkeypatch.setattr(server, "_execute", fake_execute)
+    ref = types.ResourceTemplateReference(
+        type="ref/resource", uri="snowflake://database/{database}/schemas"
+    )
+
+    await server.handle_completion(ref, types.CompletionArgument(name="database", value="d"), None)
+    await server.handle_completion(ref, types.CompletionArgument(name="database", value="db"), None)
+
+    assert calls["n"] == 1  # second keystroke served from cache
+
+
 async def test_completion_schema_without_database_context_returns_empty(monkeypatch):
     async def fail_if_called(*args, **kwargs):
         raise AssertionError("should not query without database context")
