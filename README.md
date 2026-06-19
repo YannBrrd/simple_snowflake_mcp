@@ -12,7 +12,7 @@ The server exposes the following MCP tools to interact with Snowflake:
 
 **Database Operations:**
 - **execute-snowflake-sql**: Executes a SQL query on Snowflake and returns the result. Supports `json` (default), `markdown`, and `csv` output via the `format` argument.
-- **execute-query**: Executes a SQL query with server-enforced read-only protection. In read-only mode (the default) only `SELECT`, `SHOW`, `DESCRIBE`, `EXPLAIN`, and `WITH` statements (without DML) are allowed. Read-only mode is governed **solely by server configuration** and cannot be relaxed by the caller. Supports a `limit` and `markdown` (default)/`json`/`csv` output via `format`.
+- **execute-query**: Executes a SQL query with server-enforced read-only protection. In read-only mode (the default) only `SELECT`, `SHOW`, `DESCRIBE`, `EXPLAIN`, and `WITH` statements (without DML) are allowed. Read-only mode is governed **solely by server configuration** and cannot be relaxed by the caller. Supports a `limit`, an `offset` for paging, and `markdown` (default)/`json`/`csv` output via `format`. When a result is truncated the response includes the `offset` for the next page.
 
 **Discovery and Metadata:**
 - **get-connection-info**: Returns current Snowflake connection information and server status.
@@ -22,7 +22,7 @@ The server exposes the following MCP tools to interact with Snowflake:
 - **list-tables**: Lists tables in a `database`/`schema`. Supports a `pattern` filter (wildcards) and `include_details`.
 - **list-views**: Lists views in a `database`/`schema`. Supports a `pattern` filter (wildcards) and `include_details`.
 - **describe-table**: Returns the columns and types of a `database`/`schema`/`table` (works for views too). Supports `json` (default)/`markdown`/`csv` via `format`.
-- **query-view**: Reads rows from a `database`/`schema`/`view` (or table) by name, with the same server-enforced read-only protection and row limiting as `execute-query`. Supports a `limit` and `markdown` (default)/`json`/`csv` via `format`.
+- **query-view**: Reads rows from a `database`/`schema`/`view` (or table) by name, with the same server-enforced read-only protection and row limiting as `execute-query`. Supports a `limit`, an `offset` for paging, and `markdown` (default)/`json`/`csv` via `format`.
 - **export-schema**: Exports hierarchical schema metadata (databases → schemas → tables/views → columns). Supports `json` (default), `yaml`, and `sql` via `format`, an optional `database` filter, and opt-in `include_data_samples` (table rows only, max 3 rows per table).
 
 **Notes (in-memory session state):**
@@ -102,7 +102,7 @@ logging:
 # Server Configuration
 server:
   name: "simple_snowflake_mcp"
-  version: "0.3.0"
+  version: "0.4.0"
   description: "Enhanced Snowflake MCP Server with full protocol compliance"
   connection:
     test_on_startup: true

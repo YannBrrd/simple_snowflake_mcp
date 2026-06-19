@@ -107,7 +107,9 @@ async def test_describe_table_renders_columns(monkeypatch):
 async def test_query_view_routes_through_user_query_path(monkeypatch):
     captured = {}
 
-    async def fake_execute(query, description="Query", *, is_user_sql=False, row_limit=None):
+    async def fake_execute(
+        query, description="Query", *, is_user_sql=False, row_limit=None, offset=0
+    ):
         captured["query"] = query
         captured["is_user_sql"] = is_user_sql
         return {"success": True, "data": [{"ID": 1}], "truncated": False, "row_limit": row_limit}
@@ -173,6 +175,45 @@ async def test_completion_completes_database_names(monkeypatch):
     )
 
     assert completion.values == ["DB1"]
+
+
+async def test_completion_reports_total_and_has_more_when_capped(monkeypatch):
+    many = [{"name": f"DB{i:04d}"} for i in range(150)]
+
+    async def fake_execute(query, description="Query", *, is_user_sql=False, row_limit=None):
+        return {"success": True, "data": many}
+
+    monkeypatch.setattr(server, "_execute", fake_execute)
+
+    completion = await server.handle_completion(
+        types.ResourceTemplateReference(
+            type="ref/resource", uri="snowflake://database/{database}/schemas"
+        ),
+        types.CompletionArgument(name="database", value=""),
+        None,
+    )
+
+    assert len(completion.values) == server._COMPLETION_MAX_VALUES
+    assert completion.total == 150
+    assert completion.hasMore is True
+
+
+async def test_completion_caches_lookups(monkeypatch):
+    calls = {"n": 0}
+
+    async def fake_execute(query, description="Query", *, is_user_sql=False, row_limit=None):
+        calls["n"] += 1
+        return {"success": True, "data": [{"name": "DB1"}]}
+
+    monkeypatch.setattr(server, "_execute", fake_execute)
+    ref = types.ResourceTemplateReference(
+        type="ref/resource", uri="snowflake://database/{database}/schemas"
+    )
+
+    await server.handle_completion(ref, types.CompletionArgument(name="database", value="d"), None)
+    await server.handle_completion(ref, types.CompletionArgument(name="database", value="db"), None)
+
+    assert calls["n"] == 1  # second keystroke served from cache
 
 
 async def test_completion_schema_without_database_context_returns_empty(monkeypatch):
@@ -314,3 +355,241 @@ async def test_export_schema_omits_samples_by_default(monkeypatch):
     assert payload["include_data_samples"] is False
     assert "sample_row_limit" not in payload
     assert "sample_data" not in payload["databases"][0]["schemas"][0]["tables"][0]
+
+
+# ---------------------------------------------------------------------------
+# execute-snowflake-sql output formats
+# ---------------------------------------------------------------------------
+async def test_execute_snowflake_sql_defaults_to_json(make_connection, patch_connect):
+    patch_connect(make_connection(columns=["N"], rows=[(1,)]))
+
+    result = await server.handle_call_tool("execute-snowflake-sql", {"sql": "SELECT 1 AS N"})
+
+    assert json.loads(result[0].text) == [{"N": 1}]
+
+
+async def test_execute_snowflake_sql_markdown_format(make_connection, patch_connect):
+    patch_connect(make_connection(columns=["N"], rows=[(1,)]))
+
+    result = await server.handle_call_tool(
+        "execute-snowflake-sql", {"sql": "SELECT 1 AS N", "format": "markdown"}
+    )
+
+    assert result[0].text.startswith("| N |")
+
+
+async def test_execute_snowflake_sql_csv_format(make_connection, patch_connect):
+    patch_connect(make_connection(columns=["N"], rows=[(1,)]))
+
+    result = await server.handle_call_tool(
+        "execute-snowflake-sql", {"sql": "SELECT 1 AS N", "format": "csv"}
+    )
+
+    assert result[0].text.splitlines()[0] == "N"
+    assert "1" in result[0].text.splitlines()[1]
+
+
+# ---------------------------------------------------------------------------
+# Prompt generation
+# ---------------------------------------------------------------------------
+async def test_summarize_notes_prompt_includes_notes_and_style():
+    await server.handle_call_tool("add-note", {"name": "todo", "content": "ship release"})
+
+    result = await server.handle_get_prompt("summarize-notes", {"style": "executive"})
+
+    text = result.messages[0].content.text
+    assert "todo: ship release" in text
+    assert "executive summary" in text.lower()
+
+
+async def test_analyze_snowflake_schema_prompt_uses_live_databases(monkeypatch):
+    async def fake_execute(query, description="Query", *, is_user_sql=False, row_limit=None):
+        assert query == "SHOW DATABASES"
+        return {"success": True, "data": [{"name": "DB1"}]}
+
+    monkeypatch.setattr(server, "_execute", fake_execute)
+
+    result = await server.handle_get_prompt("analyze-snowflake-schema", {"focus": "tables"})
+
+    text = result.messages[0].content.text
+    assert "DB1" in text
+    assert "tables" in text
+
+
+async def test_generate_sql_query_prompt_embeds_intent(monkeypatch):
+    async def fake_execute(query, description="Query", *, is_user_sql=False, row_limit=None):
+        return {"success": True, "data": []}
+
+    monkeypatch.setattr(server, "_execute", fake_execute)
+
+    result = await server.handle_get_prompt(
+        "generate-sql-query", {"intent": "top customers by revenue", "complexity": "advanced"}
+    )
+
+    text = result.messages[0].content.text
+    assert "top customers by revenue" in text
+    assert "advanced" in text
+
+
+async def test_troubleshoot_connection_prompt_reports_status(monkeypatch):
+    async def fake_execute(query, description="Query", *, is_user_sql=False, row_limit=None):
+        return {"success": True, "data": [{"CURRENT_VERSION()": "8.0"}]}
+
+    monkeypatch.setattr(server, "_execute", fake_execute)
+
+    result = await server.handle_get_prompt(
+        "troubleshoot-connection", {"error_message": "timeout on connect"}
+    )
+
+    text = result.messages[0].content.text
+    assert "timeout on connect" in text
+    assert "Connected successfully" in text
+
+
+async def test_get_prompt_rejects_unknown_name():
+    with pytest.raises(ValueError):
+        await server.handle_get_prompt("does-not-exist", {})
+
+
+# ---------------------------------------------------------------------------
+# Resource subscriptions
+# ---------------------------------------------------------------------------
+async def test_subscribe_and_unsubscribe_resource():
+    uri = AnyUrl("snowflake://schema/metadata")
+
+    await server.handle_subscribe_resource(uri)
+    assert str(uri) in server.resource_subscriptions
+
+    await server.handle_unsubscribe_resource(uri)
+    assert str(uri) not in server.resource_subscriptions
+
+
+# ---------------------------------------------------------------------------
+# Pagination (offset)
+# ---------------------------------------------------------------------------
+def _paging_connection(all_rows, columns):
+    """A connection mock whose cursor consumes rows positionally across fetches.
+
+    Unlike the shared make_connection fixture (which returns the same rows on
+    every fetchmany), this honors fetchmany(size)/fetchall so offset paging can
+    be exercised end to end.
+    """
+    from unittest.mock import MagicMock
+
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.description = [(c,) for c in columns]
+    state = {"pos": 0}
+
+    def fetchmany(size):
+        start = state["pos"]
+        chunk = all_rows[start : start + size]
+        state["pos"] = start + len(chunk)
+        return chunk
+
+    def fetchall():
+        start = state["pos"]
+        state["pos"] = len(all_rows)
+        return all_rows[start:]
+
+    cur.fetchmany.side_effect = fetchmany
+    cur.fetchall.side_effect = fetchall
+    cursor_cm = MagicMock()
+    cursor_cm.__enter__.return_value = cur
+    cursor_cm.__exit__.return_value = False
+    conn.cursor.return_value = cursor_cm
+    return conn
+
+
+def test_coerce_offset_bounds_and_validates():
+    assert server._coerce_offset(None) == 0
+    assert server._coerce_offset("5") == 5
+    assert server._coerce_offset(10**9) == server.MAX_QUERY_LIMIT
+    with pytest.raises(ValueError):
+        server._coerce_offset(-1)
+    with pytest.raises(ValueError):
+        server._coerce_offset(True)
+    with pytest.raises(ValueError):
+        server._coerce_offset("not-an-int")
+
+
+async def test_execute_query_offset_pages_rows(patch_connect):
+    patch_connect(_paging_connection([(i,) for i in range(10)], ["N"]))
+
+    result = await server.handle_call_tool(
+        "execute-query", {"sql": "SELECT N FROM t", "format": "json", "limit": 3, "offset": 3}
+    )
+
+    assert [row["N"] for row in json.loads(result[0].text)] == [3, 4, 5]
+
+
+async def test_execute_query_truncation_note_points_to_next_page(patch_connect):
+    patch_connect(_paging_connection([(i,) for i in range(10)], ["N"]))
+
+    result = await server.handle_call_tool(
+        "execute-query", {"sql": "SELECT N FROM t", "limit": 3, "offset": 3}
+    )
+
+    assert len(result) == 2
+    assert "offset: 6" in result[1].text
+
+
+async def test_query_view_passes_offset_through(monkeypatch):
+    captured = {}
+
+    async def fake_execute(
+        query, description="Query", *, is_user_sql=False, row_limit=None, offset=0
+    ):
+        captured["offset"] = offset
+        return {
+            "success": True,
+            "data": [],
+            "truncated": False,
+            "row_limit": row_limit,
+            "offset": offset,
+        }
+
+    monkeypatch.setattr(server, "_execute", fake_execute)
+
+    await server.handle_call_tool(
+        "query-view", {"database": "D", "schema": "S", "view": "V", "limit": 5, "offset": 10}
+    )
+
+    assert captured["offset"] == 10
+
+
+async def test_execute_query_rejects_negative_offset(make_connection, patch_connect):
+    patch_connect(make_connection())
+
+    result = await server.handle_call_tool("execute-query", {"sql": "SELECT 1", "offset": -1})
+
+    assert "Invalid request" in result[0].text
+
+
+async def test_execute_query_note_when_offset_paging_limit_reached(monkeypatch, patch_connect):
+    # When the next page would exceed MAX_QUERY_LIMIT (which _coerce_offset clamps),
+    # the note must not suggest an unreachable offset that would re-fetch the page.
+    monkeypatch.setattr(server, "MAX_QUERY_LIMIT", 5)
+    patch_connect(_paging_connection([(i,) for i in range(10)], ["N"]))
+
+    result = await server.handle_call_tool(
+        "execute-query", {"sql": "SELECT N FROM t", "limit": 3, "offset": 3}
+    )
+
+    assert len(result) == 2
+    assert "offset: 6" not in result[1].text
+    assert "offset paging limit" in result[1].text.lower()
+
+
+async def test_completion_cache_is_bounded(monkeypatch):
+    monkeypatch.setattr(server, "_COMPLETION_CACHE_MAX", 2)
+
+    async def fake_execute(query, description="Query", *, is_user_sql=False, row_limit=None):
+        return {"success": True, "data": [{"name": "X"}]}
+
+    monkeypatch.setattr(server, "_execute", fake_execute)
+
+    for i in range(5):
+        await server._completion_names(f"SHOW Q{i}", "completion")
+
+    assert len(server._completion_cache) <= 2

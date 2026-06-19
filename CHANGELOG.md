@@ -4,7 +4,9 @@ All notable changes to this project are documented here. The format is loosely
 based on [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.4.0] - 2026-06-19
+
+Feature release: granular discovery tools and fuller MCP protocol coverage.
 
 ### Added
 - Five Snowflake discovery tools: `list-schemas`, `list-tables`, `list-views`,
@@ -27,6 +29,9 @@ based on [Keep a Changelog](https://keepachangelog.com/), and the project follow
   `snowflake://database/{database}/schema/{schema}/tables`,
   `snowflake://table/{database}/{schema}/{table}`), resolved through the same
   validated, injection-safe identifier path as the discovery tools.
+- Offset-based pagination on `execute-query` and `query-view` via a bounded
+  `offset` argument. Rows are skipped at the driver (the SQL text is never
+  rewritten), and a truncated result reports the `offset` for the next page.
 
 ### Documentation
 - README now lists the five discovery tools, documents the four MCP prompts
@@ -34,6 +39,14 @@ based on [Keep a Changelog](https://keepachangelog.com/), and the project follow
   `troubleshoot-connection`) and their arguments, and reflects the new
   completion/logging/resource-template capabilities.
 - Corrected the tool inventory in `CLAUDE.md` (now 15 tools).
+
+### Fixed
+- Completion now reports the true match count in `total` and sets `hasMore`
+  when the result exceeds the response cap, instead of claiming exactly the
+  capped number of options exist.
+- The `snowflake://schema/metadata` and `snowflake://status/connection`
+  resources now serialize datetime/Decimal columns safely (`default=str`),
+  avoiding a `TypeError` on results such as `created_on` / `CURRENT_TIMESTAMP()`.
 
 ## [0.3.0]
 
