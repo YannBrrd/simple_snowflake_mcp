@@ -314,3 +314,110 @@ async def test_export_schema_omits_samples_by_default(monkeypatch):
     assert payload["include_data_samples"] is False
     assert "sample_row_limit" not in payload
     assert "sample_data" not in payload["databases"][0]["schemas"][0]["tables"][0]
+
+
+# ---------------------------------------------------------------------------
+# execute-snowflake-sql output formats
+# ---------------------------------------------------------------------------
+async def test_execute_snowflake_sql_defaults_to_json(make_connection, patch_connect):
+    patch_connect(make_connection(columns=["N"], rows=[(1,)]))
+
+    result = await server.handle_call_tool("execute-snowflake-sql", {"sql": "SELECT 1 AS N"})
+
+    assert json.loads(result[0].text) == [{"N": 1}]
+
+
+async def test_execute_snowflake_sql_markdown_format(make_connection, patch_connect):
+    patch_connect(make_connection(columns=["N"], rows=[(1,)]))
+
+    result = await server.handle_call_tool(
+        "execute-snowflake-sql", {"sql": "SELECT 1 AS N", "format": "markdown"}
+    )
+
+    assert result[0].text.startswith("| N |")
+
+
+async def test_execute_snowflake_sql_csv_format(make_connection, patch_connect):
+    patch_connect(make_connection(columns=["N"], rows=[(1,)]))
+
+    result = await server.handle_call_tool(
+        "execute-snowflake-sql", {"sql": "SELECT 1 AS N", "format": "csv"}
+    )
+
+    assert result[0].text.splitlines()[0] == "N"
+    assert "1" in result[0].text.splitlines()[1]
+
+
+# ---------------------------------------------------------------------------
+# Prompt generation
+# ---------------------------------------------------------------------------
+async def test_summarize_notes_prompt_includes_notes_and_style():
+    await server.handle_call_tool("add-note", {"name": "todo", "content": "ship release"})
+
+    result = await server.handle_get_prompt("summarize-notes", {"style": "executive"})
+
+    text = result.messages[0].content.text
+    assert "todo: ship release" in text
+    assert "executive summary" in text.lower()
+
+
+async def test_analyze_snowflake_schema_prompt_uses_live_databases(monkeypatch):
+    async def fake_execute(query, description="Query", *, is_user_sql=False, row_limit=None):
+        assert query == "SHOW DATABASES"
+        return {"success": True, "data": [{"name": "DB1"}]}
+
+    monkeypatch.setattr(server, "_execute", fake_execute)
+
+    result = await server.handle_get_prompt("analyze-snowflake-schema", {"focus": "tables"})
+
+    text = result.messages[0].content.text
+    assert "DB1" in text
+    assert "tables" in text
+
+
+async def test_generate_sql_query_prompt_embeds_intent(monkeypatch):
+    async def fake_execute(query, description="Query", *, is_user_sql=False, row_limit=None):
+        return {"success": True, "data": []}
+
+    monkeypatch.setattr(server, "_execute", fake_execute)
+
+    result = await server.handle_get_prompt(
+        "generate-sql-query", {"intent": "top customers by revenue", "complexity": "advanced"}
+    )
+
+    text = result.messages[0].content.text
+    assert "top customers by revenue" in text
+    assert "advanced" in text
+
+
+async def test_troubleshoot_connection_prompt_reports_status(monkeypatch):
+    async def fake_execute(query, description="Query", *, is_user_sql=False, row_limit=None):
+        return {"success": True, "data": [{"CURRENT_VERSION()": "8.0"}]}
+
+    monkeypatch.setattr(server, "_execute", fake_execute)
+
+    result = await server.handle_get_prompt(
+        "troubleshoot-connection", {"error_message": "timeout on connect"}
+    )
+
+    text = result.messages[0].content.text
+    assert "timeout on connect" in text
+    assert "Connected successfully" in text
+
+
+async def test_get_prompt_rejects_unknown_name():
+    with pytest.raises(ValueError):
+        await server.handle_get_prompt("does-not-exist", {})
+
+
+# ---------------------------------------------------------------------------
+# Resource subscriptions
+# ---------------------------------------------------------------------------
+async def test_subscribe_and_unsubscribe_resource():
+    uri = AnyUrl("snowflake://schema/metadata")
+
+    await server.handle_subscribe_resource(uri)
+    assert str(uri) in server.resource_subscriptions
+
+    await server.handle_unsubscribe_resource(uri)
+    assert str(uri) not in server.resource_subscriptions
