@@ -102,7 +102,7 @@ logging:
 # Server Configuration
 server:
   name: "simple_snowflake_mcp"
-  version: "0.3.0"
+  version: "0.4.0"
   description: "Enhanced Snowflake MCP Server with full protocol compliance"
   connection:
     test_on_startup: true

@@ -4,7 +4,9 @@ All notable changes to this project are documented here. The format is loosely
 based on [Keep a Changelog](https://keepachangelog.com/), and the project follows
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.4.0] - 2026-06-19
+
+Feature release: granular discovery tools and fuller MCP protocol coverage.
 
 ### Added
 - Five Snowflake discovery tools: `list-schemas`, `list-tables`, `list-views`,
