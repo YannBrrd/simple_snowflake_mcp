@@ -831,6 +831,88 @@ async def handle_list_resources() -> list[types.Resource]:
     return resources
 
 
+@server.list_resource_templates()
+async def handle_list_resource_templates() -> list[types.ResourceTemplate]:
+    """
+    List templated Snowflake resources so clients can browse the object hierarchy
+    by filling in URI variables (database/schema/table) rather than only reading
+    the fixed metadata/status resources.
+    """
+    return [
+        types.ResourceTemplate(
+            uriTemplate="snowflake://database/{database}/schemas",
+            name="Schemas in database",
+            description="List schemas in a Snowflake database",
+            mimeType="application/json",
+        ),
+        types.ResourceTemplate(
+            uriTemplate="snowflake://database/{database}/schema/{schema}/tables",
+            name="Tables in schema",
+            description="List tables in a Snowflake schema",
+            mimeType="application/json",
+        ),
+        types.ResourceTemplate(
+            uriTemplate="snowflake://table/{database}/{schema}/{table}",
+            name="Table description",
+            description="Describe the columns of a Snowflake table or view",
+            mimeType="application/json",
+        ),
+    ]
+
+
+def _resource_metadata_json(result: dict[str, Any]) -> str:
+    """Render a SHOW/DESCRIBE result as a timestamped JSON resource body."""
+    if result["success"]:
+        return json.dumps(
+            {"timestamp": datetime.now().isoformat(), "data": result["data"]},
+            indent=2,
+            default=str,
+        )
+    return json.dumps({"error": result["error"]}, indent=2)
+
+
+async def _read_snowflake_template(host: str | None, path_parts: list[str]) -> str | None:
+    """
+    Resolve a templated ``snowflake://`` resource URI. Returns the JSON body, or
+    None if the URI does not match a known template. Identifiers are validated
+    (no quotes/whitespace/separators) so the interpolated SQL is injection-safe.
+    """
+    if host == "database" and len(path_parts) == 2 and path_parts[1] == "schemas":
+        database = validate_identifier(path_parts[0], "database")
+        result = await _execute(
+            f"SHOW SCHEMAS IN DATABASE {database}", "Resource - schemas", row_limit=MAX_QUERY_LIMIT
+        )
+        return _resource_metadata_json(result)
+
+    if (
+        host == "database"
+        and len(path_parts) == 4
+        and path_parts[1] == "schema"
+        and path_parts[3] == "tables"
+    ):
+        database = validate_identifier(path_parts[0], "database")
+        schema = validate_identifier(path_parts[2], "schema")
+        result = await _execute(
+            f"SHOW TABLES IN SCHEMA {database}.{schema}",
+            "Resource - tables",
+            row_limit=MAX_QUERY_LIMIT,
+        )
+        return _resource_metadata_json(result)
+
+    if host == "table" and len(path_parts) == 3:
+        database = validate_identifier(path_parts[0], "database")
+        schema = validate_identifier(path_parts[1], "schema")
+        table = validate_identifier(path_parts[2], "table")
+        result = await _execute(
+            f"DESCRIBE TABLE {database}.{schema}.{table}",
+            "Resource - describe",
+            row_limit=MAX_QUERY_LIMIT,
+        )
+        return _resource_metadata_json(result)
+
+    return None
+
+
 @server.read_resource()
 async def handle_read_resource(uri: AnyUrl) -> str:
     """
@@ -888,6 +970,12 @@ async def handle_read_resource(uri: AnyUrl) -> str:
                 }
             return json.dumps(status_data, indent=2)
 
+        # Fall through to the templated resources (database/schema/table browsing).
+        path_parts = [p for p in (uri.path or "").split("/") if p]
+        template_body = await _read_snowflake_template(uri.host, path_parts)
+        if template_body is not None:
+            return template_body
+
     raise ValueError(f"Unsupported URI scheme or path: {uri}")
 
 
@@ -919,6 +1007,32 @@ async def handle_unsubscribe_resource(uri: AnyUrl) -> None:
         resource_subscriptions[uri_str].discard("default_client")
         if not resource_subscriptions[uri_str]:
             del resource_subscriptions[uri_str]
+
+
+# MCP logging levels (RFC 5424 names) mapped onto Python's logging levels. NOTICE
+# has no Python equivalent (folds to INFO); ALERT/EMERGENCY fold to CRITICAL.
+_MCP_TO_PYTHON_LOG_LEVEL = {
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "notice": logging.INFO,
+    "warning": logging.WARNING,
+    "error": logging.ERROR,
+    "critical": logging.CRITICAL,
+    "alert": logging.CRITICAL,
+    "emergency": logging.CRITICAL,
+}
+
+
+@server.set_logging_level()
+async def handle_set_logging_level(level: types.LoggingLevel) -> None:
+    """
+    Honor a client's logging/setLevel request by adjusting the server's log
+    verbosity. Logging is configured on the root logger (see setup_logging), so
+    the level is applied there.
+    """
+    py_level = _MCP_TO_PYTHON_LOG_LEVEL.get(level, logging.INFO)
+    logging.getLogger().setLevel(py_level)
+    logger.info("Log level set to '%s' (Python level %d) by client request", level, py_level)
 
 
 @server.list_prompts()
@@ -1136,6 +1250,83 @@ Please provide:
         )
 
     raise ValueError(f"Unknown prompt: {name}")
+
+
+# Static completion values for the enumerated prompt arguments (4a). MCP
+# completion applies to prompts and resource templates only (not tool inputs).
+_PROMPT_ARGUMENT_COMPLETIONS: dict[tuple[str, str], list[str]] = {
+    ("summarize-notes", "style"): ["brief", "detailed", "executive"],
+    ("summarize-notes", "format"): ["text", "markdown", "json"],
+    ("analyze-snowflake-schema", "focus"): ["tables", "views", "functions", "all"],
+    ("generate-sql-query", "complexity"): ["simple", "intermediate", "advanced"],
+}
+
+# Bound completion responses so a large account can't return an unwieldy list.
+_COMPLETION_MAX_VALUES = 100
+
+
+async def _complete_resource_template_argument(
+    argument: types.CompletionArgument, context: types.CompletionContext | None
+) -> list[str]:
+    """
+    Best-effort completion for the database/schema/table variables in the
+    templated Snowflake resources. Live names are fetched via the chokepoint;
+    on any error (or missing prerequisite context) an empty list is returned so
+    completion never surfaces an error to the client.
+    """
+    ctx_args = (context.arguments if context else None) or {}
+    try:
+        if argument.name == "database":
+            result = await _execute(
+                "SHOW DATABASES", "Completion - databases", row_limit=MAX_QUERY_LIMIT
+            )
+        elif argument.name == "schema":
+            database = validate_identifier(ctx_args.get("database", ""), "database")
+            result = await _execute(
+                f"SHOW SCHEMAS IN DATABASE {database}",
+                "Completion - schemas",
+                row_limit=MAX_QUERY_LIMIT,
+            )
+        elif argument.name in ("table", "view"):
+            database = validate_identifier(ctx_args.get("database", ""), "database")
+            schema = validate_identifier(ctx_args.get("schema", ""), "schema")
+            kind = "TABLES" if argument.name == "table" else "VIEWS"
+            result = await _execute(
+                f"SHOW {kind} IN SCHEMA {database}.{schema}",
+                "Completion - objects",
+                row_limit=MAX_QUERY_LIMIT,
+            )
+        else:
+            return []
+    except ValueError:
+        # Prerequisite context (e.g. database) missing or invalid; offer nothing.
+        return []
+
+    if not result["success"]:
+        return []
+    return [row.get("name", "") for row in result["data"] if row.get("name")]
+
+
+@server.completion()
+async def handle_completion(
+    ref: types.PromptReference | types.ResourceTemplateReference,
+    argument: types.CompletionArgument,
+    context: types.CompletionContext | None,
+) -> types.Completion:
+    """
+    Provide argument completions for prompts (enumerated values) and templated
+    Snowflake resources (live database/schema/table names).
+    """
+    if isinstance(ref, types.PromptReference):
+        values = _PROMPT_ARGUMENT_COMPLETIONS.get((ref.name, argument.name), [])
+    else:
+        values = await _complete_resource_template_argument(argument, context)
+
+    prefix = (argument.value or "").lower()
+    if prefix:
+        values = [v for v in values if v.lower().startswith(prefix)]
+    values = values[:_COMPLETION_MAX_VALUES]
+    return types.Completion(values=values, total=len(values), hasMore=False)
 
 
 @server.list_tools()
@@ -1975,12 +2166,12 @@ async def main():
     notifications = mcp_config["notifications"]
     experimental = mcp_config["experimental_features"]
 
-    # Build experimental capabilities dict
+    # Build experimental capabilities dict. Completion is now a first-class
+    # capability advertised automatically from the registered completion handler
+    # (see get_capabilities), so it is no longer surfaced as an experimental flag.
     experimental_caps = {}
     if experimental.get("resource_subscriptions", False):
         experimental_caps["resourceSubscriptions"] = True
-    if experimental.get("completion_support", False):
-        experimental_caps["completionSupport"] = True
 
     # Run the server using stdin/stdout streams
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):

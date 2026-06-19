@@ -1,10 +1,11 @@
 # Missing Features — Implementation Plan
 
-Status: in progress (Phases 1–3 done) · Target baseline: v0.3.0 · Owner: maintainers
+Status: in progress · Target baseline: v0.3.0 · Owner: maintainers
 
-> **Progress:** Phase 1 (discovery tools), Phase 2 (documentation sync), and
-> Phase 3 (test backfill) are implemented. Phase 4 (MCP protocol completeness —
-> completion handler, MCP logging, pagination, resource templates) remains.
+> **Progress:** Phases 1–3 (discovery tools, documentation sync, test backfill)
+> and most of Phase 4 are implemented: MCP completion (4a), MCP logging (4b),
+> and resource templates (4d). The only remaining item is pagination (4c),
+> intentionally deferred — see the note under Phase 4.
 
 This document inventories gaps between what `simple-snowflake-mcp` currently
 ships and what users (and the MCP protocol) reasonably expect, then proposes a
@@ -118,15 +119,21 @@ Cheap, no code risk; can land alongside Phase 1.
 - Add prompt generation tests and resource subscribe/unsubscribe tests.
 
 ### Phase 4 — MCP protocol completeness (Gap B) — **largest scope**
-- **Completion**: implement a `completion/complete` handler (prompt args +
-  database/schema name completion via cached metadata), then keep the
-  capability flag honest. If deferred, change the default so the capability is
-  not advertised without a handler.
-- **MCP logging**: add a `logging/setLevel` handler that maps to the existing
-  logger and emits MCP log notifications.
-- **Pagination**: add optional `offset`/`cursor` to row-returning tools,
-  threaded through `_safe_snowflake_execute`'s `fetchmany` bounding.
-- **Resource templates**: expose templated Snowflake URIs for browsing.
+- **Completion** ✅ done: a `completion/complete` handler suggests enumerated
+  prompt-argument values and live database/schema/table names for the resource
+  templates. The capability is now advertised from the real handler (the inert
+  experimental `completionSupport` flag was removed).
+- **MCP logging** ✅ done: a `logging/setLevel` handler maps the requested level
+  onto the root logger.
+- **Resource templates** ✅ done: templated `snowflake://` URIs expose
+  schema/table browsing, resolved through the same validated identifier path as
+  the discovery tools.
+- **Pagination** ⏸ deferred: the chokepoint deliberately bounds rows at the
+  driver via `fetchmany` rather than editing SQL text. Efficient offset/cursor
+  paging would require either rewriting SQL (breaks that invariant) or
+  fetch-and-discard (wasteful for deep pages), so it is intentionally not
+  shipped. Callers can page with an explicit `LIMIT`/`OFFSET` in
+  `execute-query`, or raise `limit` on the result-returning tools.
 
 Phase 4 items are independent and can be picked up individually.
 
@@ -139,10 +146,10 @@ Phase 4 items are independent and can be picked up individually.
 | 1     | 5 discovery tools + tests      | M      | Med   | P0       |
 | 2     | README/CLAUDE.md sync          | S      | Low   | P0       |
 | 3     | Test backfill                  | S–M    | Low   | P1       |
-| 4a    | Completion handler / honest cap| M      | Med   | P1       |
-| 4b    | MCP logging                    | S      | Low   | P2       |
-| 4c    | Pagination                     | M      | Med   | P2       |
-| 4d    | Resource templates             | M      | Med   | P3       |
+| 4a    | Completion handler / honest cap| M      | Med   | P1 ✅     |
+| 4b    | MCP logging                    | S      | Low   | P2 ✅     |
+| 4c    | Pagination                     | M      | Med   | P2 ⏸      |
+| 4d    | Resource templates             | M      | Med   | P3 ✅     |
 
 ## Risks & invariants to preserve
 - **Identifier injection.** The new discovery tools take object names; these
@@ -155,4 +162,5 @@ Phase 4 items are independent and can be picked up individually.
 - **CI green.** `ruff check`, `ruff format --check`, and `pytest` must stay
   green; add tests with each new tool.
 - **Capabilities must be honest.** Don't advertise an MCP capability without a
-  working handler (applies to completion support today).
+  working handler. (Resolved: completion is now backed by a real handler and the
+  inert experimental flag was removed.)

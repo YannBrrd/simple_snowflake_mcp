@@ -483,7 +483,13 @@ This server now implements comprehensive MCP protocol features:
 **📋 Enhanced Resource Management**
 - Dynamic resource discovery and listing
 - Detailed resource metadata and descriptions  
-- Support for resource templates and prompts
+- Resource templates for browsing the object hierarchy by URI
+  (`snowflake://database/{database}/schemas`,
+  `snowflake://database/{database}/schema/{schema}/tables`,
+  `snowflake://table/{database}/{schema}/{table}`)
+- Argument completion for prompts and resource templates (live database/
+  schema/table name suggestions)
+- Client-controlled log verbosity via the MCP `logging/setLevel` request
 
 **⚡ Performance & Reliability**
 - Configurable query limits and a server-side statement timeout
@@ -499,10 +505,11 @@ This server now implements comprehensive MCP protocol features:
 
 The server advertises these MCP capabilities:
 - ✅ **Tools**: Full tool execution with comprehensive schemas
-- ✅ **Resources**: Dynamic resource discovery and subscriptions  
+- ✅ **Resources**: Dynamic resource discovery, subscriptions, and templates
 - ✅ **Prompts**: Enhanced prompts with resource integration
 - ✅ **Notifications**: Real-time change notifications
-- 🚧 **Completion**: Ready for future MCP versions (configurable)
+- ✅ **Completion**: Argument completion for prompts and resource templates
+- ✅ **Logging**: Client-controlled log level via `logging/setLevel`
 
 ## Supported MCP Functions
 

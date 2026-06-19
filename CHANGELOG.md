@@ -16,11 +16,23 @@ based on [Keep a Changelog](https://keepachangelog.com/), and the project follow
 - Tests for the new discovery tools (including identifier-injection rejection)
   plus backfilled coverage for `list-snowflake-warehouses` and
   `get-connection-info`.
+- MCP completion support: a `completion/complete` handler that suggests
+  enumerated prompt-argument values and live database/schema/table names for
+  the resource templates. The capability is now advertised from the real
+  handler rather than an inert experimental flag.
+- MCP logging support: a `logging/setLevel` handler so clients can adjust the
+  server's log verbosity at runtime.
+- Resource templates for browsing the object hierarchy by URI
+  (`snowflake://database/{database}/schemas`,
+  `snowflake://database/{database}/schema/{schema}/tables`,
+  `snowflake://table/{database}/{schema}/{table}`), resolved through the same
+  validated, injection-safe identifier path as the discovery tools.
 
 ### Documentation
-- README now lists the five discovery tools and documents the four MCP prompts
+- README now lists the five discovery tools, documents the four MCP prompts
   (`summarize-notes`, `analyze-snowflake-schema`, `generate-sql-query`,
-  `troubleshoot-connection`) and their arguments.
+  `troubleshoot-connection`) and their arguments, and reflects the new
+  completion/logging/resource-template capabilities.
 - Corrected the tool inventory in `CLAUDE.md` (now 15 tools).
 
 ## [0.3.0]

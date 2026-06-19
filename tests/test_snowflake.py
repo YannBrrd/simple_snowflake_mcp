@@ -5,6 +5,11 @@ conftest.py. Security-focused unit tests live in test_security.py.
 """
 
 import json
+import logging
+
+import mcp.types as types
+import pytest
+from pydantic import AnyUrl
 
 from simple_snowflake_mcp import server
 
@@ -140,6 +145,93 @@ async def test_discovery_tools_require_scope(make_connection, patch_connect):
 
     assert "Invalid request" in missing_db[0].text
     assert "Invalid request" in missing_schema[0].text
+
+
+async def test_completion_completes_prompt_argument():
+    completion = await server.handle_completion(
+        types.PromptReference(type="ref/prompt", name="summarize-notes"),
+        types.CompletionArgument(name="style", value="d"),
+        None,
+    )
+
+    assert completion.values == ["detailed"]
+
+
+async def test_completion_completes_database_names(monkeypatch):
+    async def fake_execute(query, description="Query", *, is_user_sql=False, row_limit=None):
+        assert query == "SHOW DATABASES"
+        return {"success": True, "data": [{"name": "DB1"}, {"name": "PROD"}]}
+
+    monkeypatch.setattr(server, "_execute", fake_execute)
+
+    completion = await server.handle_completion(
+        types.ResourceTemplateReference(
+            type="ref/resource", uri="snowflake://database/{database}/schemas"
+        ),
+        types.CompletionArgument(name="database", value="d"),
+        None,
+    )
+
+    assert completion.values == ["DB1"]
+
+
+async def test_completion_schema_without_database_context_returns_empty(monkeypatch):
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("should not query without database context")
+
+    monkeypatch.setattr(server, "_execute", fail_if_called)
+
+    completion = await server.handle_completion(
+        types.ResourceTemplateReference(
+            type="ref/resource", uri="snowflake://database/{database}/schema/{schema}/tables"
+        ),
+        types.CompletionArgument(name="schema", value=""),
+        None,
+    )
+
+    assert completion.values == []
+
+
+async def test_set_logging_level_adjusts_root_logger():
+    root = logging.getLogger()
+    original = root.level
+    try:
+        await server.handle_set_logging_level("error")
+        assert root.level == logging.ERROR
+    finally:
+        root.setLevel(original)
+
+
+async def test_list_resource_templates_exposes_browsable_uris():
+    templates = await server.handle_list_resource_templates()
+    uris = {t.uriTemplate for t in templates}
+    assert "snowflake://database/{database}/schemas" in uris
+    assert "snowflake://table/{database}/{schema}/{table}" in uris
+
+
+async def test_read_resource_template_describes_table(monkeypatch):
+    captured = {}
+
+    async def fake_execute(query, description="Query", *, is_user_sql=False, row_limit=None):
+        captured["query"] = query
+        return {"success": True, "data": [{"name": "ID", "type": "NUMBER"}]}
+
+    monkeypatch.setattr(server, "_execute", fake_execute)
+
+    body = await server.handle_read_resource(AnyUrl("snowflake://table/DB1/PUBLIC/CUSTOMERS"))
+
+    assert captured["query"] == "DESCRIBE TABLE DB1.PUBLIC.CUSTOMERS"
+    assert json.loads(body)["data"] == [{"name": "ID", "type": "NUMBER"}]
+
+
+async def test_read_resource_template_rejects_bad_identifier(monkeypatch):
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("query should be rejected before execution")
+
+    monkeypatch.setattr(server, "_execute", fail_if_called)
+
+    with pytest.raises(ValueError):
+        await server.handle_read_resource(AnyUrl("snowflake://database/DB1.X/schemas"))
 
 
 async def test_add_and_delete_note():
